@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# lib/ - This was excluding our source code lib directory
+# lib64/
 parts/
 sdist/
 var/
@@ -97,7 +97,7 @@ celerybeat-schedule
 
 # Environments
 .env
-.venv
+.venv/
 venv/
 ENV/
 env.bak/
@@ -149,17 +149,32 @@ specs/
 .specify/
 
 *.log
-.env
-.env.local
-.env.*.local
 checkpoints.db
 
 # Demo repository (if created during demo runs)
 demo-repo/
 
-# Virtual environments
-venv/
+# Virtual environments - be more specific to avoid excluding source code
+venv/lib/
+.venv/lib/
+env/lib/
+ENV/lib/
+venv.bak/lib/
+env.bak/lib/
+venv/lib64/
+.venv/lib64/
+env/lib64/
+ENV/lib64/
+venv.bak/lib64/
+env.bak/lib64/
 
-# Compiled Python files in tests (if any)
-tests/__pycache__/
-tests/*.py[cod]
+# Compiled Python files (in any directory)
+*.py[cod]
+
+# Don't ignore the tests directory itself as requested
+!tests/
+!tests/**
+
+# Don't ignore source code directories
+!src/**/lib/
+!src/**/lib/**
