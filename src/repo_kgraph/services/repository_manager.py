@@ -15,8 +15,8 @@ from uuid import uuid4
 
 from repo_kgraph.models.repository import Repository, RepositoryStatus
 from repo_kgraph.models.knowledge_graph import KnowledgeGraph, GraphStatus
-from repo_kgraph.models.code_entity import CodeEntity
-from repo_kgraph.models.relationship import Relationship
+from repo_kgraph.models.code_entity import CodeEntity, EntityType
+from repo_kgraph.models.relationship import Relationship, RelationshipType
 from repo_kgraph.services.parser import CodeParser, ParsingStats
 from repo_kgraph.services.graph_builder import GraphBuilder
 from repo_kgraph.services.embedding import EmbeddingService
@@ -44,8 +44,8 @@ class RepositoryManager:
         parser: CodeParser,
         graph_builder: GraphBuilder,
         embedding_service: EmbeddingService,
-        max_concurrent_files: int = 10,
-        batch_size: int = 1000
+        max_concurrent_files: int = 32,
+        batch_size: int = 2000
     ):
         """
         Initialize the repository manager.
@@ -214,53 +214,74 @@ class RepositoryManager:
                 relationship_callback=collect_relationship_callback
             )
 
-            # Add entities to graph in batches
-            entities_added = 0
-            for i in range(0, len(all_entities), self.batch_size):
-                batch = all_entities[i:i + self.batch_size]
-                batch_added = await self.graph_builder.add_entities_batch(batch)
-                entities_added += batch_added
-                logger.debug(f"Added entity batch: {batch_added} entities")
-
-            # Add relationships to graph in batches
-            relationships_added = 0
-            for i in range(0, len(all_relationships), self.batch_size):
-                batch = all_relationships[i:i + self.batch_size]
-                batch_added = await self.graph_builder.add_relationships_batch(batch)
-                relationships_added += batch_added
-                logger.debug(f"Added relationship batch: {batch_added} relationships")
-
-            logger.info(f"Added {entities_added} entities to graph")
-            logger.info(f"Added {relationships_added} relationships to graph")
-
-            # Phase 5: Generate embeddings with unlimited timeout for development
-            await self._update_progress(repository_id, 70.0, "embedding_generation", progress_callback)
-            logger.info(f"Starting embedding generation for {len(all_entities)} entities (may take time on resource-constrained systems)")
-
+            # ATOMIC OPERATION: Both Neo4j and ChromaDB must succeed or both fail
             try:
+                # Phase 5: Generate embeddings FIRST (before storing anything)
+                await self._update_progress(repository_id, 50.0, "embedding_generation", progress_callback)
+                logger.info(f"Pre-generating embeddings for {len(all_entities)} entities (ensuring atomic operation)")
+
                 embeddings_created = await self._generate_embeddings(all_entities, repository_id, progress_callback)
-                logger.info(f"Generated {embeddings_created} embeddings successfully")
+                if embeddings_created != len(all_entities):
+                    raise Exception(f"Embedding generation incomplete: {embeddings_created}/{len(all_entities)} entities")
+
+                logger.info(f"Successfully pre-generated {embeddings_created} embeddings")
+
+                # Phase 6: Atomic storage in both databases
+                await self._update_progress(repository_id, 70.0, "atomic_storage", progress_callback)
+
+                # Store in Neo4j first (faster, easier to rollback)
+                entities_added = 0
+                for i in range(0, len(all_entities), self.batch_size):
+                    batch = all_entities[i:i + self.batch_size]
+                    batch_added = await self.graph_builder.add_entities_batch(batch)
+                    entities_added += batch_added
+
+                # Phase 6.5: Resolve cross-file relationships (temporarily disabled for testing)
+                await self._update_progress(repository_id, 75.0, "cross_file_resolution", progress_callback)
+                # cross_file_relationships = self._resolve_cross_file_relationships(all_entities, all_relationships)
+                # all_relationships.extend(cross_file_relationships)
+                logger.info("Cross-file resolution temporarily disabled for testing")
+
+                relationships_added = 0
+                for i in range(0, len(all_relationships), self.batch_size):
+                    batch = all_relationships[i:i + self.batch_size]
+                    batch_added = await self.graph_builder.add_relationships_batch(batch)
+                    relationships_added += batch_added
+
+                logger.info(f"Neo4j storage complete: {entities_added} entities, {relationships_added} relationships")
+
+                # Store in ChromaDB (must succeed or rollback Neo4j)
+                await self._update_progress(repository_id, 85.0, "vector_storage", progress_callback)
+                collection_name = f"repo_{repository_id}"
+
+                embeddings_stored = await self.embedding_service.store_embeddings_in_chroma(
+                    all_entities, collection_name
+                )
+
+                if not embeddings_stored:
+                    raise Exception("ChromaDB storage failed - rolling back Neo4j data")
+
+                # Consistency check
+                if embeddings_created != len(all_entities):
+                    raise Exception(f"Consistency error: {embeddings_created} embeddings != {len(all_entities)} entities")
+
+                # Final consistency validation
+                await self._validate_database_consistency(repository_id, entities_added)
+                logger.info(f"ATOMIC SUCCESS: Both databases synchronized and validated with {entities_added} entities")
+
             except Exception as e:
-                logger.error(f"Embedding generation failed: {e}", exc_info=True)
-                embeddings_created = 0
+                logger.error(f"ATOMIC OPERATION FAILED: {e}")
 
-            # Phase 6: Store embeddings with unlimited timeout
-            await self._update_progress(repository_id, 90.0, "embedding_storage", progress_callback)
-
-            if embeddings_created > 0:
+                # Rollback Neo4j data if ChromaDB failed
                 try:
-                    collection_name = f"repo_{repository_id}"
-                    logger.info(f"Storing embeddings in ChromaDB collection: {collection_name}")
-                    embeddings_stored = await self.embedding_service.store_embeddings_in_chroma(
-                        all_entities, collection_name
-                    )
-                    logger.info(f"Stored {embeddings_stored} embeddings successfully")
-                except Exception as e:
-                    logger.error(f"Embedding storage failed: {e}", exc_info=True)
-                    embeddings_stored = 0
-            else:
-                embeddings_stored = 0
-                logger.info("No embeddings to store")
+                    logger.warning(f"Rolling back Neo4j data for repository {repository_id}")
+                    await self.graph_builder.delete_repository_graph(repository_id)
+                    logger.info(f"Rollback completed for repository {repository_id}")
+                except Exception as rollback_error:
+                    logger.error(f"Rollback failed: {rollback_error}")
+
+                # Re-raise the original error
+                raise RepositoryManagerError(f"Atomic storage operation failed: {e}")
 
             # Phase 7: Calculate final metrics
             await self._update_progress(repository_id, 95.0, "metrics_calculation", progress_callback)
@@ -609,6 +630,301 @@ class RepositoryManager:
         except Exception as e:
             logger.error(f"Failed to list repositories: {e}")
             raise RepositoryManagerError(f"Repository listing failed: {e}")
+
+    async def clear_all_repositories(self) -> bool:
+        """
+        Clear all repository data from the system.
+
+        WARNING: This will permanently delete all parsed repositories,
+        their entities, relationships, and embeddings.
+
+        Returns:
+            True if clearing successful, False otherwise
+        """
+        try:
+            logger.info("Starting to clear all repository data")
+
+            # Get list of all repositories first
+            repositories = await self.list_repositories()
+
+            if not repositories:
+                logger.info("No repositories found to clear")
+                return True
+
+            logger.info(f"Found {len(repositories)} repositories to clear")
+
+            # Delete each repository individually
+            deleted_count = 0
+            failed_count = 0
+
+            for repo in repositories:
+                repo_id = repo.get("repository_id")
+                if repo_id:
+                    try:
+                        success = await self.delete_repository(repo_id)
+                        if success:
+                            deleted_count += 1
+                            logger.info(f"Deleted repository: {repo_id}")
+                        else:
+                            failed_count += 1
+                            logger.warning(f"Failed to delete repository: {repo_id}")
+                    except Exception as e:
+                        failed_count += 1
+                        logger.error(f"Error deleting repository {repo_id}: {e}")
+
+            # Additional cleanup: try to clear any remaining data in Neo4j
+            try:
+                if hasattr(self.graph_builder, 'clear_all_data'):
+                    await self.graph_builder.clear_all_data()
+                else:
+                    # If no clear_all_data method, try manual cleanup
+                    await self._manual_database_cleanup()
+            except Exception as e:
+                logger.warning(f"Additional database cleanup failed: {e}")
+
+            # Try to clear all Chroma collections
+            try:
+                await self._clear_all_vector_collections()
+            except Exception as e:
+                logger.warning(f"Vector database cleanup failed: {e}")
+
+            # Clear any active operations
+            self._active_operations.clear()
+            self._parsing_results.clear()
+
+            if failed_count == 0:
+                logger.info(f"Successfully cleared all {deleted_count} repositories")
+                return True
+            else:
+                logger.warning(f"Cleared {deleted_count} repositories, {failed_count} failed")
+                return deleted_count > 0
+
+        except Exception as e:
+            logger.error(f"Failed to clear all repositories: {e}")
+            return False
+
+    async def _manual_database_cleanup(self) -> None:
+        """Manually clear all data from Neo4j database."""
+        try:
+            # This is a brute force approach - delete all nodes and relationships
+            logger.info("Performing manual database cleanup")
+
+            # We'll need to add this method to the graph builder
+            # For now, just log that this would happen
+            logger.info("Manual cleanup would delete all nodes and relationships from Neo4j")
+
+        except Exception as e:
+            logger.error(f"Manual database cleanup failed: {e}")
+
+    async def _clear_all_vector_collections(self) -> None:
+        """Clear all vector collections from ChromaDB."""
+        try:
+            if self.embedding_service._chroma_client:
+                logger.info("Clearing all ChromaDB collections")
+
+                # Get all collections
+                collections = self.embedding_service._chroma_client.list_collections()
+
+                # Delete collections that start with 'repo_'
+                deleted_collections = 0
+                for collection in collections:
+                    if collection.name.startswith('repo_'):
+                        try:
+                            self.embedding_service._chroma_client.delete_collection(collection.name)
+                            deleted_collections += 1
+                            logger.info(f"Deleted collection: {collection.name}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete collection {collection.name}: {e}")
+
+                logger.info(f"Deleted {deleted_collections} vector collections")
+            else:
+                logger.warning("ChromaDB client not available for cleanup")
+
+        except Exception as e:
+            logger.error(f"Vector collection cleanup failed: {e}")
+
+    async def _validate_database_consistency(self, repository_id: str, expected_entities: int) -> None:
+        """Validate that Neo4j and ChromaDB have consistent data."""
+        try:
+            # Get entity count from Neo4j
+            neo4j_entities = await self.graph_builder.get_entities_by_repository(
+                repository_id=repository_id,
+                limit=None  # Get all entities for count
+            )
+            neo4j_count = len(neo4j_entities)
+
+            # Get entity count from ChromaDB
+            collection_name = f"repo_{repository_id}"
+            try:
+                collection = self.embedding_service._chroma_client.get_collection(collection_name)
+                chroma_count = collection.count()
+            except Exception:
+                chroma_count = 0
+
+            # Consistency checks
+            if neo4j_count != expected_entities:
+                raise Exception(f"Neo4j consistency error: {neo4j_count} != {expected_entities}")
+
+            if chroma_count != expected_entities:
+                raise Exception(f"ChromaDB consistency error: {chroma_count} != {expected_entities}")
+
+            if neo4j_count != chroma_count:
+                raise Exception(f"Database sync error: Neo4j({neo4j_count}) != ChromaDB({chroma_count})")
+
+            logger.info(f"✓ Database consistency validated: {neo4j_count} entities in both systems")
+
+        except Exception as e:
+            logger.error(f"Consistency validation failed: {e}")
+            raise
+
+    async def health_check(self) -> Dict[str, Any]:
+        """Comprehensive health check for production monitoring."""
+        health_status = {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "services": {},
+            "errors": []
+        }
+
+        # Check Neo4j connectivity
+        try:
+            await self.graph_builder.get_entities_by_repository("health_check", limit=1)
+            health_status["services"]["neo4j"] = "healthy"
+        except Exception as e:
+            health_status["services"]["neo4j"] = "unhealthy"
+            health_status["errors"].append(f"Neo4j: {str(e)}")
+            health_status["status"] = "degraded"
+
+        # Check ChromaDB connectivity
+        try:
+            if self.embedding_service._chroma_client:
+                collections = self.embedding_service._chroma_client.list_collections()
+                health_status["services"]["chromadb"] = "healthy"
+                health_status["services"]["chromadb_collections"] = len(collections)
+            else:
+                health_status["services"]["chromadb"] = "unhealthy"
+                health_status["errors"].append("ChromaDB: Client not initialized")
+                health_status["status"] = "degraded"
+        except Exception as e:
+            health_status["services"]["chromadb"] = "unhealthy"
+            health_status["errors"].append(f"ChromaDB: {str(e)}")
+            health_status["status"] = "degraded"
+
+        # Check embedding service
+        try:
+            if self.embedding_service._model:
+                health_status["services"]["embedding"] = "healthy"
+                health_status["services"]["embedding_model"] = self.embedding_service.model_name
+            else:
+                health_status["services"]["embedding"] = "unhealthy"
+                health_status["errors"].append("Embedding: Model not loaded")
+                health_status["status"] = "degraded"
+        except Exception as e:
+            health_status["services"]["embedding"] = "unhealthy"
+            health_status["errors"].append(f"Embedding: {str(e)}")
+            health_status["status"] = "degraded"
+
+        # Set overall status
+        if health_status["errors"]:
+            if len(health_status["errors"]) >= 2:
+                health_status["status"] = "unhealthy"
+
+        return health_status
+
+    def _resolve_cross_file_relationships(
+        self,
+        entities: List[CodeEntity],
+        relationships: List[Relationship]
+    ) -> List[Relationship]:
+        """
+        Resolve cross-file relationships by matching import statements with actual entities.
+
+        Args:
+            entities: All entities from all files
+            relationships: Existing relationships
+
+        Returns:
+            List of new cross-file relationships
+        """
+        cross_file_relationships = []
+
+        # Create lookup maps for fast entity resolution
+        entity_by_name = {}
+        entity_by_qualified_name = {}
+        import_entities = []
+
+        for entity in entities:
+            # Index by name for simple lookups
+            if entity.name not in entity_by_name:
+                entity_by_name[entity.name] = []
+            entity_by_name[entity.name].append(entity)
+
+            # Index by qualified name for precise lookups
+            entity_by_qualified_name[entity.qualified_name] = entity
+
+            # Collect import entities
+            if entity.entity_type == EntityType.MODULE:
+                import_entities.append(entity)
+
+        # Process each import to find corresponding entities
+        for import_entity in import_entities:
+            try:
+                import_text = import_entity.content or import_entity.name
+
+                # Parse different import patterns
+                if import_text.startswith('from '):
+                    # from module import function/class
+                    parts = import_text.replace('from ', '').split(' import ')
+                    if len(parts) == 2:
+                        module_name = parts[0].strip()
+                        imported_names = [name.strip() for name in parts[1].split(',')]
+
+                        for imported_name in imported_names:
+                            # Find entities that match the imported name
+                            if imported_name in entity_by_name:
+                                for target_entity in entity_by_name[imported_name]:
+                                    if target_entity.entity_type in [EntityType.FUNCTION, EntityType.CLASS]:
+                                        # Create IMPORTS relationship
+                                        relationship = Relationship(
+                                            repository_id=import_entity.repository_id,
+                                            source_entity_id=import_entity.id,
+                                            target_entity_id=target_entity.id,
+                                            relationship_type=RelationshipType.IMPORTS,
+                                            strength=1.0,
+                                            metadata={
+                                                "import_type": "from_import",
+                                                "module": module_name,
+                                                "imported_name": imported_name
+                                            }
+                                        )
+                                        cross_file_relationships.append(relationship)
+
+                elif import_text.startswith('import '):
+                    # import module
+                    module_name = import_text.replace('import ', '').strip()
+
+                    # Find file entities that match the module name
+                    for entity in entities:
+                        if (entity.entity_type == EntityType.FILE and
+                            entity.name.replace('.py', '') == module_name):
+                            # Create IMPORTS relationship
+                            relationship = Relationship(
+                                repository_id=import_entity.repository_id,
+                                source_entity_id=import_entity.id,
+                                target_entity_id=entity.id,
+                                relationship_type=RelationshipType.IMPORTS,
+                                strength=1.0,
+                                metadata={
+                                    "import_type": "module_import",
+                                    "module": module_name
+                                }
+                            )
+                            cross_file_relationships.append(relationship)
+
+            except Exception as e:
+                logger.warning(f"Failed to resolve cross-file relationship for import {import_entity.name}: {e}")
+
+        return cross_file_relationships
 
     async def cleanup(self) -> None:
         """Cleanup resources and connections."""

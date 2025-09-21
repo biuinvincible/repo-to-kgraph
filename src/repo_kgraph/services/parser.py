@@ -24,6 +24,8 @@ except ImportError:
 
 from repo_kgraph.models.code_entity import CodeEntity, EntityType
 from repo_kgraph.models.relationship import Relationship, RelationshipType
+from repo_kgraph.lib.source_filter import SourceCodeFilter
+from repo_kgraph.services.flow_analyzer import FlowAnalyzer
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,7 @@ class CodeParser:
         self.max_file_size_bytes = int(max_file_size_mb * 1024 * 1024)
         self._parsers: Dict[str, Parser] = {}
         self._languages: Dict[str, Language] = {}
+        self.flow_analyzer = FlowAnalyzer()
         self._initialize_parsers()
 
     def _initialize_parsers(self) -> None:
@@ -398,13 +401,17 @@ class CodeParser:
                     )
                     relationships.append(rel)
 
-                # Process function body for calls
-                # Recurse into children of the function body using the function as parent
-                for child in getattr(node, 'children', []):
-                    try:
-                        extract_node(child, func_entity.id)
-                    except Exception:
-                        logger.exception("Error extracting child node inside function %s", getattr(func_entity, 'name', '<unknown>'))
+                # Process function body for nested functions and calls
+                # Only process the body block, not the signature
+                body_node = node.child_by_field_name('body')
+                if body_node:
+                    for child in getattr(body_node, 'children', []):
+                        try:
+                            extract_node(child, func_entity.id)
+                        except Exception:
+                            logger.exception("Error extracting child node inside function %s", getattr(func_entity, 'name', '<unknown>'))
+                # Return early to avoid double processing function children
+                return
 
             elif node_type == 'class_definition':
                 logger.debug("Found class definition node")
@@ -418,29 +425,112 @@ class CodeParser:
 
                 entities.append(class_entity)
 
-                # Process class body
-                # Recurse into class children
+                # Process class body - extract methods and nested classes
                 for child in getattr(node, 'children', []):
                     try:
                         extract_node(child, class_entity.id)
                     except Exception:
                         logger.exception("Error extracting child node inside class %s", getattr(class_entity, 'name', '<unknown>'))
+                # Return early to avoid double processing class children
+                return
+
+            elif node_type == 'import_statement' or node_type == 'import_from_statement':
+                # Extract import statements for relationships
+                import_text = node.text.decode('utf-8').strip() if getattr(node, 'text', None) else ""
+                if import_text:
+                    # Create import entity
+                    import_entity = CodeEntity(
+                        repository_id=repository_id,
+                        entity_type=EntityType.MODULE,
+                        name=import_text,
+                        qualified_name=f"{relative_file_path}::{import_text}",
+                        file_path=relative_file_path,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        start_column=node.start_point[1],
+                        end_column=node.end_point[1],
+                        language="python",
+                        content=import_text
+                    )
+                    entities.append(import_entity)
+
+                    # Create IMPORTS relationship from file to import
+                    file_id = f"{repository_id}::{relative_file_path}"
+                    relationship = Relationship(
+                        repository_id=repository_id,
+                        source_entity_id=file_id,
+                        target_entity_id=import_entity.id,
+                        relationship_type=RelationshipType.IMPORTS,
+                        strength=1.0,
+                        metadata={"import_statement": import_text}
+                    )
+                    relationships.append(relationship)
 
             elif node_type == 'call':
                 # Extract function calls for relationships
                 if parent_id:
-                    # This would need more sophisticated analysis
-                    # to resolve function names to entity IDs
-                    pass
+                    function_node = node.child_by_field_name('function')
+                    if function_node:
+                        called_name = function_node.text.decode('utf-8').strip() if getattr(function_node, 'text', None) else ""
+                        if called_name:
+                            # Look for the called function in our entities
+                            for entity in entities:
+                                if (entity.entity_type == EntityType.FUNCTION and
+                                    (entity.name == called_name or entity.qualified_name.endswith(f".{called_name}")) and
+                                    entity.id != parent_id):  # Avoid self-referential relationships
+                                    # Create CALLS relationship
+                                    relationship = Relationship(
+                                        repository_id=repository_id,
+                                        source_entity_id=parent_id,
+                                        target_entity_id=entity.id,
+                                        relationship_type=RelationshipType.CALLS,
+                                        strength=1.0,
+                                        metadata={"function_name": called_name}
+                                    )
+                                    relationships.append(relationship)
+                                    break
 
-            # Recursively process ALL children to ensure we find nested entities
-            # We process specific node types above, then recurse into all children
-            for child in getattr(node, 'children', []):
-                try:
-                    extract_node(child, parent_id)
-                except Exception:
-                    child_type = getattr(child, 'type', '<unknown>')
-                    logger.exception("Error extracting child node %s", child_type)
+            elif node_type == 'assignment':
+                # Extract variable assignments
+                targets = node.child_by_field_name('left')
+                if targets and parent_id:
+                    var_name = targets.text.decode('utf-8').strip() if getattr(targets, 'text', None) else ""
+                    if var_name and not var_name.startswith('_'):  # Skip private variables
+                        # Create variable entity
+                        var_entity = CodeEntity(
+                            repository_id=repository_id,
+                            entity_type=EntityType.VARIABLE,
+                            name=var_name,
+                            qualified_name=f"{relative_file_path}::{var_name}",
+                            file_path=relative_file_path,
+                            start_line=node.start_point[0] + 1,
+                            end_line=node.end_point[0] + 1,
+                            start_column=node.start_point[1],
+                            end_column=node.end_point[1],
+                            language="python"
+                        )
+                        entities.append(var_entity)
+
+                        # Create CONTAINS relationship from parent to variable
+                        relationship = Relationship(
+                            repository_id=repository_id,
+                            source_entity_id=parent_id,
+                            target_entity_id=var_entity.id,
+                            relationship_type=RelationshipType.CONTAINS,
+                            strength=1.0,
+                            metadata={"variable_name": var_name}
+                        )
+                        relationships.append(relationship)
+
+            # Only process children if we're not in a class or function definition
+            # This prevents double extraction
+            if node_type not in ['class_definition', 'function_definition']:
+                for child in getattr(node, 'children', []):
+                    try:
+                        extract_node(child, parent_id)
+                    except Exception:
+                        child_type = getattr(child, 'type', '<unknown>')
+                        logger.exception("Error extracting child node %s", child_type)
 
         # Start extraction
         logger.debug("Starting node extraction")
@@ -555,8 +645,14 @@ class CodeParser:
                     func_name = child.text.decode('utf-8') if getattr(child, 'text', None) else 'unknown_function'
                     break
 
-            # Extract signature (simplified)
+            # Extract signature (first line only)
             signature = node.text.decode('utf-8').split('\n')[0] if getattr(node, 'text', None) else ""
+
+            # Extract complete function content
+            full_content = node.text.decode('utf-8') if getattr(node, 'text', None) else ""
+
+            # Perform basic semantic analysis
+            semantic_analysis = self._analyze_function_semantics(node, full_content)
 
             entity = CodeEntity(
                 repository_id=repository_id,
@@ -570,7 +666,17 @@ class CodeParser:
                 end_column=end_column,
                 language=language,
                 signature=signature,
-                line_count=end_line - start_line + 1
+                content=full_content,  # ✅ NOW STORING FULL CONTENT
+                line_count=end_line - start_line + 1,
+
+                # Enhanced semantic information
+                dependencies=semantic_analysis.get("dependencies", []),
+                side_effects=semantic_analysis.get("side_effects", []),
+                error_handling=semantic_analysis.get("error_handling", {}),
+                control_flow_info=semantic_analysis.get("control_flow", {}),
+                data_flow_info=semantic_analysis.get("data_flow", {}),
+                call_patterns=semantic_analysis.get("call_patterns", {}),
+                complexity_metrics=semantic_analysis.get("complexity_metrics", {})
             )
             
             logger.debug(f"Created function entity: {func_name}")
@@ -581,6 +687,216 @@ class CodeParser:
             import traceback
             logger.error(traceback.format_exc())
             return None
+
+    def _analyze_function_semantics(self, node: Any, content: str) -> Dict[str, Any]:
+        """
+        Perform semantic analysis on function content for coding agent context.
+
+        Analyzes dependencies, side effects, error handling, and flow patterns.
+        """
+        try:
+            analysis = {
+                "dependencies": [],
+                "side_effects": [],
+                "error_handling": {},
+                "control_flow": {},
+                "data_flow": {}
+            }
+
+            if not content:
+                return analysis
+
+            # Parse with Python AST for deeper analysis
+            try:
+                import ast
+                parsed_ast = ast.parse(content)
+
+                # Create a temporary entity for flow analysis
+                temp_entity = CodeEntity(
+                    id=f"temp_{hash(content)}",
+                    repository_id="temp_repo",
+                    name="temp_function",
+                    qualified_name="temp.temp_function",
+                    entity_type=EntityType.FUNCTION,
+                    file_path="temp_file.py",
+                    start_line=1,
+                    end_line=len(content.split('\n')),
+                    start_column=0,
+                    end_column=0,
+                    language="python",
+                    content=content
+                )
+
+                # Use comprehensive flow analyzer
+                flow_results = self.flow_analyzer.analyze_entity_flows(temp_entity)
+
+                if flow_results:
+                    analysis.update({
+                        "dependencies": self._extract_dependencies(parsed_ast),
+                        "side_effects": self._detect_side_effects(parsed_ast),
+                        "error_handling": self._analyze_error_handling(parsed_ast),
+                        "control_flow": flow_results.get("control_flow", {}),
+                        "data_flow": flow_results.get("data_flow", {}),
+                        "call_patterns": flow_results.get("call_patterns", {}),
+                        "complexity_metrics": flow_results.get("complexity_metrics", {})
+                    })
+                else:
+                    # Fallback to basic analysis
+                    analysis["dependencies"] = self._extract_dependencies(parsed_ast)
+                    analysis["side_effects"] = self._detect_side_effects(parsed_ast)
+                    analysis["error_handling"] = self._analyze_error_handling(parsed_ast)
+                    analysis["control_flow"] = self._analyze_control_flow(parsed_ast)
+                    analysis["data_flow"] = self._analyze_data_flow(parsed_ast)
+
+            except SyntaxError:
+                # If AST parsing fails, fall back to text-based analysis
+                analysis = self._text_based_semantic_analysis(content)
+
+            return analysis
+
+        except Exception as e:
+            logger.warning(f"Semantic analysis failed: {e}")
+            return {
+                "dependencies": [],
+                "side_effects": [],
+                "error_handling": {},
+                "control_flow": {},
+                "data_flow": {}
+            }
+
+    def _extract_dependencies(self, ast_node) -> List[str]:
+        """Extract function calls and variable references."""
+        import ast
+        dependencies = []
+
+        for node in ast.walk(ast_node):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    dependencies.append(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    # For method calls like obj.method()
+                    dependencies.append(f"{ast.unparse(node.func)}")
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                # Variable usage
+                if node.id not in dependencies:
+                    dependencies.append(node.id)
+
+        return list(set(dependencies))  # Remove duplicates
+
+    def _detect_side_effects(self, ast_node) -> List[str]:
+        """Detect side effects like file I/O, database calls, network requests."""
+        import ast
+        side_effects = []
+
+        side_effect_patterns = {
+            'file_io': ['open', 'read', 'write', 'close'],
+            'database': ['execute', 'query', 'commit', 'rollback'],
+            'network': ['request', 'get', 'post', 'fetch'],
+            'logging': ['log', 'debug', 'info', 'warning', 'error'],
+            'global_state': ['global', 'nonlocal']
+        }
+
+        for node in ast.walk(ast_node):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                func_name = node.func.id.lower()
+                for effect_type, patterns in side_effect_patterns.items():
+                    if any(pattern in func_name for pattern in patterns):
+                        side_effects.append(f"{effect_type}: {func_name}")
+
+        return side_effects
+
+    def _analyze_error_handling(self, ast_node) -> Dict[str, Any]:
+        """Analyze error handling patterns."""
+        import ast
+        error_info = {
+            "try_blocks": 0,
+            "exception_types": [],
+            "has_finally": False,
+            "error_patterns": []
+        }
+
+        for node in ast.walk(ast_node):
+            if isinstance(node, ast.Try):
+                error_info["try_blocks"] += 1
+                if node.finalbody:
+                    error_info["has_finally"] = True
+
+                for handler in node.handlers:
+                    if handler.type:
+                        exception_type = ast.unparse(handler.type)
+                        error_info["exception_types"].append(exception_type)
+
+        return error_info
+
+    def _analyze_control_flow(self, ast_node) -> Dict[str, Any]:
+        """Analyze control flow patterns."""
+        import ast
+        control_flow = {
+            "branches": 0,
+            "loops": 0,
+            "returns": 0,
+            "complexity_indicators": []
+        }
+
+        for node in ast.walk(ast_node):
+            if isinstance(node, ast.If):
+                control_flow["branches"] += 1
+                control_flow["complexity_indicators"].append("conditional_branch")
+            elif isinstance(node, (ast.For, ast.While)):
+                control_flow["loops"] += 1
+                control_flow["complexity_indicators"].append("loop")
+            elif isinstance(node, ast.Return):
+                control_flow["returns"] += 1
+
+        return control_flow
+
+    def _analyze_data_flow(self, ast_node) -> Dict[str, Any]:
+        """Analyze data flow patterns."""
+        import ast
+        data_flow = {
+            "variables_assigned": [],
+            "variables_used": [],
+            "parameters": [],
+            "return_values": []
+        }
+
+        for node in ast.walk(ast_node):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        data_flow["variables_assigned"].append(target.id)
+            elif isinstance(node, ast.FunctionDef):
+                data_flow["parameters"] = [arg.arg for arg in node.args.args]
+            elif isinstance(node, ast.Return) and node.value:
+                data_flow["return_values"].append(ast.unparse(node.value))
+
+        return data_flow
+
+    def _text_based_semantic_analysis(self, content: str) -> Dict[str, Any]:
+        """Fallback text-based analysis when AST parsing fails."""
+        analysis = {
+            "dependencies": [],
+            "side_effects": [],
+            "error_handling": {},
+            "control_flow": {},
+            "data_flow": {}
+        }
+
+        lines = content.split('\n')
+
+        # Simple pattern matching for dependencies
+        for line in lines:
+            line = line.strip()
+            if line.startswith('import ') or line.startswith('from '):
+                analysis["dependencies"].append(line)
+            if 'try:' in line:
+                analysis["error_handling"]["has_try_block"] = True
+            if any(keyword in line for keyword in ['if ', 'elif ', 'else:']):
+                analysis["control_flow"]["has_conditionals"] = True
+            if any(keyword in line for keyword in ['for ', 'while ']):
+                analysis["control_flow"]["has_loops"] = True
+
+        return analysis
 
     def _create_class_entity(
         self,
@@ -605,6 +921,12 @@ class CodeParser:
                     class_name = child.text.decode('utf-8')
                     break
 
+            # Extract complete class content
+            full_content = node.text.decode('utf-8') if getattr(node, 'text', None) else ""
+
+            # Perform semantic analysis
+            semantic_analysis = self._analyze_function_semantics(node, full_content)
+
             entity = CodeEntity(
                 repository_id=repository_id,
                 entity_type=EntityType.CLASS,
@@ -616,7 +938,17 @@ class CodeParser:
                 start_column=start_column,
                 end_column=end_column,
                 language=language,
-                line_count=end_line - start_line + 1
+                content=full_content,  # ✅ FULL CLASS CONTENT
+                line_count=end_line - start_line + 1,
+
+                # Enhanced semantic information
+                dependencies=semantic_analysis.get("dependencies", []),
+                side_effects=semantic_analysis.get("side_effects", []),
+                error_handling=semantic_analysis.get("error_handling", {}),
+                control_flow_info=semantic_analysis.get("control_flow", {}),
+                data_flow_info=semantic_analysis.get("data_flow", {}),
+                call_patterns=semantic_analysis.get("call_patterns", {}),
+                complexity_metrics=semantic_analysis.get("complexity_metrics", {})
             )
             
             logger.debug(f"Created class entity: {class_name}")
@@ -635,7 +967,7 @@ class CodeParser:
         repository_id: str,
         include_patterns: Optional[List[str]] = None,
         exclude_patterns: Optional[List[str]] = None,
-        max_workers: int = 4
+        max_workers: int = 16
     ) -> ParsingStats:
         """
         Parse all supported files in a directory.
@@ -796,60 +1128,38 @@ class CodeParser:
         include_patterns: Optional[List[str]],
         exclude_patterns: Optional[List[str]]
     ) -> List[str]:
-        """Find files to parse in directory."""
+        """Find files to parse in directory using SourceCodeFilter with .gitignore support."""
         import fnmatch
 
-        directory = Path(directory_path)
+        # Use SourceCodeFilter for sophisticated filtering with .gitignore support
+        source_filter = SourceCodeFilter(
+            custom_excludes=exclude_patterns,
+            use_gitignore=True  # Enable .gitignore support
+        )
+
+        # Get filtered files using the source filter
+        filtered_files, filter_stats = source_filter.filter_files(directory_path)
+
+        # Log filtering statistics
+        if filter_stats.get('gitignore_files_found', 0) > 0:
+            logger.info(f"Found {filter_stats['gitignore_files_found']} .gitignore files")
+            if filter_stats.get('excluded_by_gitignore', 0) > 0:
+                logger.info(f"Excluded {filter_stats['excluded_by_gitignore']} files by .gitignore rules")
+
+        logger.debug(f"Source filtering stats: {filter_stats}")
+
+        # Now filter by language support and include patterns
         files_to_parse = []
+        directory = Path(directory_path)
 
-        exclude_patterns = exclude_patterns or []
-        default_excludes = [
-            "*.pyc",
-            "__pycache__/*",
-            "node_modules/*",
-            "*/node_modules/*",
-            ".git/*",
-            "*.min.js",
-            "*.min.css",
-            "build/*",
-            "dist/*",
-            ".venv/*",
-            "venv/*",
-            "env/*",
-            ".env/*",
-            "*.egg-info/*",
-            ".pytest_cache/*",
-            ".idea/*",
-            ".vscode/*",
-            "*.db",
-            "checkpoints.db",
-            "*.log",
-            "logs/*",
-        ]
-        exclude_patterns.extend(default_excludes)
-
-        for file_path in directory.rglob("*"):
-            if not file_path.is_file():
-                continue
-
+        for file_path in filtered_files:
             # Check if file type is supported
             if not self.detect_language(str(file_path)):
                 continue
 
-            relative_path = str(file_path.relative_to(directory))
-
-            # Check exclude patterns
-            excluded = False
-            for pattern in exclude_patterns:
-                if fnmatch.fnmatch(relative_path, pattern):
-                    excluded = True
-                    break
-
-            if excluded:
-                continue
-
-            # Check include patterns if specified
+            # Apply include patterns if specified
             if include_patterns:
+                relative_path = str(Path(file_path).relative_to(directory))
                 included = False
                 for pattern in include_patterns:
                     if fnmatch.fnmatch(relative_path, pattern):

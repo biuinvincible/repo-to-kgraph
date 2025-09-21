@@ -1,33 +1,23 @@
 """
 Embedding service for generating semantic vectors.
 
-Handles text embedding generation using Ollama with embeddinggemma model,
-sentence transformers, and OpenAI with vector storage in Chroma database 
-for similarity search.
+Handles text embedding generation using HuggingFace CodeT5+ model via LangChain
+with vector storage in Chroma database for similarity search.
 """
 
 import asyncio
 import logging
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime
-import hashlib
 
 try:
     from sentence_transformers import SentenceTransformer
-    from sentence_transformers.util import cos_sim
 except ImportError:
     SentenceTransformer = None
-    cos_sim = None
 
 try:
-    import openai
+    from langchain_huggingface import HuggingFaceEmbeddings
 except ImportError:
-    openai = None
-
-try:
-    from langchain_ollama import OllamaEmbeddings
-except ImportError:
-    OllamaEmbeddings = None
+    HuggingFaceEmbeddings = None
 
 try:
     import chromadb
@@ -52,74 +42,70 @@ class EmbeddingService:
     """
     Service for generating and managing semantic embeddings.
 
-    Supports multiple embedding models and vector storage backends
-    with optimized batch processing and similarity search.
+    Uses SentenceTransformer with Salesforce/SweRankEmbed-Small for code-optimized embeddings
+    with optimized batch processing and vector storage in ChromaDB.
     """
 
     def __init__(
         self,
-        model_name: str = "embeddinggemma",
-        embedding_provider: str = "ollama",  # or "sentence_transformers" or "openai"
+        model_name: str = "Salesforce/SweRankEmbed-Small",
         chroma_db_path: str = "./chroma_db",
-        openai_api_key: Optional[str] = None,
-        batch_size: int = 32,
-        max_text_length: int = 8192
+        batch_size: int = 128,
+        max_text_length: int = 8192,
+        device: str = "cpu"  # Use "cuda" for GPU acceleration if available
     ):
         """
-        Initialize the embedding service.
+        Initialize the embedding service with SentenceTransformer.
 
         Args:
-            model_name: Name of the embedding model to use
-            embedding_provider: Provider for embeddings ("ollama", "sentence_transformers" or "openai")
+            model_name: Model name (default: Salesforce/SweRankEmbed-Small for code ranking)
             chroma_db_path: Path to Chroma database storage
-            openai_api_key: OpenAI API key if using OpenAI embeddings
             batch_size: Batch size for processing
             max_text_length: Maximum text length for embeddings
+            device: Device to run the model on ("cpu" or "cuda")
         """
         self.model_name = model_name
-        self.embedding_provider = embedding_provider
         self.chroma_db_path = chroma_db_path
         self.batch_size = batch_size
         self.max_text_length = max_text_length
+        self.device = device
+        self.embedding_provider = "sentence_transformers"
 
         self._model = None
         self._chroma_client = None
         self._embedding_dim = None
 
-        # Initialize based on provider
-        if embedding_provider == "openai" and openai:
-            if openai_api_key:
-                openai.api_key = openai_api_key
-            self._embedding_dim = 1536  # OpenAI ada-002 dimension
-        elif embedding_provider == "ollama" and OllamaEmbeddings:
-            self._load_ollama_embeddings()
-        elif embedding_provider == "sentence_transformers" and SentenceTransformer:
-            self._load_sentence_transformer()
-        else:
-            logger.warning(f"Embedding provider {embedding_provider} not available")
+        # Initialize SentenceTransformer model
+        self._load_sentence_transformer()
 
         # Initialize Chroma client
         self._initialize_chroma()
 
     def _load_sentence_transformer(self) -> None:
-        """Load sentence transformer model."""
+        """Load SentenceTransformer model for code embeddings."""
+        if not SentenceTransformer:
+            raise EmbeddingError("sentence-transformers not available. Install with: pip install sentence-transformers")
+
         try:
-            self._model = SentenceTransformer(self.model_name)
-            self._embedding_dim = self._model.get_sentence_embedding_dimension()
-            logger.info(f"Loaded SentenceTransformer model {self.model_name} with dimension {self._embedding_dim}")
+            logger.info(f"Loading SentenceTransformer model {self.model_name}...")
+
+            # Initialize SentenceTransformer with trust_remote_code=True for SweRankEmbed
+            self._model = SentenceTransformer(
+                self.model_name,
+                device=self.device,
+                trust_remote_code=True
+            )
+
+            # Test embedding to get dimension
+            test_embedding = self._model.encode(["test"])
+            self._embedding_dim = len(test_embedding[0])
+
+            logger.info(f"Loaded SentenceTransformer model {self.model_name}")
+            logger.info(f"Embedding dimension: {self._embedding_dim}")
+            logger.info(f"Device: {self.device}")
+
         except Exception as e:
             logger.error(f"Failed to load SentenceTransformer model: {e}")
-            raise EmbeddingError(f"Cannot load model {self.model_name}: {e}")
-
-    def _load_ollama_embeddings(self) -> None:
-        """Load Ollama embedding model."""
-        try:
-            self._model = OllamaEmbeddings(model=self.model_name)
-            # embeddinggemma typically produces 2048-dimensional embeddings
-            self._embedding_dim = 2048
-            logger.info(f"Loaded Ollama embedding model {self.model_name} with dimension {self._embedding_dim}")
-        except Exception as e:
-            logger.error(f"Failed to load Ollama embedding model: {e}")
             raise EmbeddingError(f"Cannot load model {self.model_name}: {e}")
 
     def _initialize_chroma(self) -> None:
@@ -136,7 +122,7 @@ class EmbeddingService:
 
     async def generate_embedding(self, text: str) -> Optional[List[float]]:
         """
-        Generate embedding for a single text.
+        Generate embedding for a single text using HuggingFace CodeBERT.
 
         Args:
             text: Text to embed
@@ -152,59 +138,30 @@ class EmbeddingService:
             text = text[:self.max_text_length]
 
         try:
-            if self.embedding_provider == "openai" and openai:
-                return await self._generate_openai_embedding(text)
-            elif self.embedding_provider == "ollama" and self._model:
-                return await self._generate_ollama_embedding(text)
-            elif self.embedding_provider == "sentence_transformers" and self._model:
-                return await self._generate_sentence_transformer_embedding(text)
-            else:
-                logger.error("No embedding provider available")
-                return None
-
+            return await self._generate_sentence_transformer_embedding(text)
         except Exception as e:
             logger.error(f"Failed to generate embedding: {e}")
             return None
 
-    async def _generate_openai_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding using OpenAI API."""
-        try:
-            response = await openai.Embedding.acreate(
-                model="text-embedding-ada-002",
-                input=text
-            )
-            return response['data'][0]['embedding']
-        except Exception as e:
-            logger.error(f"OpenAI embedding generation failed: {e}")
+    async def _generate_sentence_transformer_embedding(self, text: str) -> Optional[List[float]]:
+        """Generate embedding using SentenceTransformer model."""
+        if not self._model:
+            logger.error("SentenceTransformer model not loaded")
             return None
 
-    async def _generate_ollama_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding using Ollama."""
         try:
-            # Run in thread pool to avoid blocking
+            # Run in thread pool to avoid blocking the event loop
             loop = asyncio.get_event_loop()
+            # Use SentenceTransformer.encode() for document embeddings
             embedding = await loop.run_in_executor(
                 None,
-                lambda: self._model.embed_query(text)
+                lambda: self._model.encode([text])[0].tolist()
             )
             return embedding
         except Exception as e:
-            logger.error(f"Ollama embedding generation failed: {e}")
-            return None
-
-    async def _generate_sentence_transformer_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding using sentence transformers."""
-        try:
-            # Run in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            embedding = await loop.run_in_executor(
-                None,
-                lambda: self._model.encode([text], convert_to_tensor=False)[0]
-            )
-            return embedding.tolist()
-        except Exception as e:
             logger.error(f"SentenceTransformer embedding generation failed: {e}")
             return None
+
 
     async def generate_embeddings_batch(
         self,
@@ -236,51 +193,30 @@ class EmbeddingService:
         self,
         batch: List[str]
     ) -> List[Optional[List[float]]]:
-        """Process a single batch of texts for embedding."""
-        if self.embedding_provider == "sentence_transformers" and self._model:
-            try:
-                # Truncate texts
-                truncated_batch = [
-                    text[:self.max_text_length] if len(text) > self.max_text_length else text
-                    for text in batch
-                ]
+        """Process a single batch of texts for embedding using SentenceTransformer."""
+        if not self._model:
+            logger.error("SentenceTransformer model not loaded")
+            return [None] * len(batch)
 
-                # Generate embeddings in thread pool
-                loop = asyncio.get_event_loop()
-                embeddings = await loop.run_in_executor(
-                    None,
-                    lambda: self._model.encode(truncated_batch, convert_to_tensor=False)
-                )
+        try:
+            # Truncate texts to max length
+            truncated_batch = [
+                text[:self.max_text_length] if len(text) > self.max_text_length else text
+                for text in batch
+            ]
 
-                return [emb.tolist() for emb in embeddings]
+            # Generate embeddings in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            embeddings = await loop.run_in_executor(
+                None,
+                lambda: self._model.encode(truncated_batch).tolist()
+            )
 
-            except Exception as e:
-                logger.error(f"Batch embedding generation failed: {e}")
-                return [None] * len(batch)
+            return embeddings
 
-        elif self.embedding_provider == "ollama" and self._model:
-            try:
-                # Truncate texts
-                truncated_batch = [
-                    text[:self.max_text_length] if len(text) > self.max_text_length else text
-                    for text in batch
-                ]
-
-                # Generate embeddings using Ollama
-                loop = asyncio.get_event_loop()
-                embeddings = await loop.run_in_executor(
-                    None,
-                    lambda: self._model.embed_documents(truncated_batch)
-                )
-
-                return embeddings
-
-            except Exception as e:
-                logger.error(f"Batch embedding generation failed: {e}")
-                return [None] * len(batch)
-
-        else:
-            # Fallback to individual processing for OpenAI or other providers
+        except Exception as e:
+            logger.error(f"Batch embedding generation failed: {e}")
+            # Fallback to individual processing
             embeddings = []
             for text in batch:
                 embedding = await self.generate_embedding(text)
@@ -312,10 +248,23 @@ class EmbeddingService:
         if entity.docstring:
             text_parts.append(f"Documentation: {entity.docstring}")
 
-        # Add content snippet if available (truncated)
+        # Add full content for better context (if available)
         if entity.content:
-            content_snippet = entity.content[:500]  # First 500 chars
-            text_parts.append(f"Content: {content_snippet}")
+            text_parts.append(f"Implementation:\n{entity.content}")
+
+        # Add semantic analysis information
+        if entity.dependencies:
+            text_parts.append(f"Dependencies: {', '.join(entity.dependencies)}")
+
+        if entity.control_flow_info:
+            flow_desc = self._describe_control_flow(entity.control_flow_info)
+            if flow_desc:
+                text_parts.append(f"Control Flow: {flow_desc}")
+
+        if entity.error_handling:
+            error_desc = self._describe_error_handling(entity.error_handling)
+            if error_desc:
+                text_parts.append(f"Error Handling: {error_desc}")
 
         # Create combined text
         text = "\n".join(text_parts)
@@ -522,7 +471,7 @@ class EmbeddingService:
         Returns:
             True if embedding successful, False otherwise
         """
-        embedding = await self.generate_embedding(query.query_text)
+        embedding = await self.generate_query_embedding(query.query_text)
 
         if embedding:
             query.query_embedding = embedding
@@ -530,6 +479,70 @@ class EmbeddingService:
             return True
 
         return False
+
+    async def generate_query_embedding(self, query_text: str) -> Optional[List[float]]:
+        """
+        Generate embedding for a query using SweRankEmbed with proper prompt.
+
+        Args:
+            query_text: Query text to embed
+
+        Returns:
+            Embedding vector or None if failed
+        """
+        if not self._model:
+            logger.error("Model not loaded")
+            return None
+
+        try:
+            # Run in thread pool to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            # Use SentenceTransformer.encode() with prompt_name="query" for SweRankEmbed
+            embedding = await loop.run_in_executor(
+                None,
+                lambda: self._model.encode([query_text], prompt_name="query")[0].tolist()
+            )
+            return embedding
+        except Exception as e:
+            logger.error(f"Query embedding generation failed: {e}")
+            # Fallback to regular embedding (without prompt_name)
+            return await self.generate_embedding(query_text)
+
+    def _describe_control_flow(self, control_flow_info: Dict[str, Any]) -> str:
+        """Create human-readable description of control flow."""
+        parts = []
+
+        if control_flow_info.get("branches", 0) > 0:
+            parts.append(f"{control_flow_info['branches']} conditional branches")
+
+        if control_flow_info.get("loops", 0) > 0:
+            parts.append(f"{control_flow_info['loops']} loops")
+
+        if control_flow_info.get("returns", 0) > 1:
+            parts.append(f"multiple return paths")
+
+        complexity = control_flow_info.get("complexity_indicators", [])
+        if complexity:
+            parts.append(f"contains {', '.join(complexity[:3])}")
+
+        return "; ".join(parts) if parts else ""
+
+    def _describe_error_handling(self, error_handling: Dict[str, Any]) -> str:
+        """Create human-readable description of error handling."""
+        parts = []
+
+        try_blocks = error_handling.get("try_blocks", 0)
+        if try_blocks > 0:
+            parts.append(f"{try_blocks} try-except blocks")
+
+        exception_types = error_handling.get("exception_types", [])
+        if exception_types:
+            parts.append(f"handles {', '.join(exception_types[:3])}")
+
+        if error_handling.get("has_finally"):
+            parts.append("includes finally block")
+
+        return "; ".join(parts) if parts else ""
 
     def calculate_similarity(
         self,
@@ -550,22 +563,26 @@ class EmbeddingService:
             return 0.0
 
         try:
-            if cos_sim and SentenceTransformer:
+            # Try to use torch/sentence-transformers for optimized calculation
+            try:
                 import torch
+                from sentence_transformers.util import cos_sim
                 tensor1 = torch.tensor(embedding1).unsqueeze(0)
                 tensor2 = torch.tensor(embedding2).unsqueeze(0)
                 return float(cos_sim(tensor1, tensor2).item())
-            else:
-                # Manual cosine similarity calculation
-                import math
-                dot_product = sum(a * b for a, b in zip(embedding1, embedding2))
-                magnitude_a = math.sqrt(sum(a * a for a in embedding1))
-                magnitude_b = math.sqrt(sum(b * b for b in embedding2))
+            except ImportError:
+                pass
 
-                if magnitude_a == 0 or magnitude_b == 0:
-                    return 0.0
+            # Fallback to manual cosine similarity calculation
+            import math
+            dot_product = sum(a * b for a, b in zip(embedding1, embedding2))
+            magnitude_a = math.sqrt(sum(a * a for a in embedding1))
+            magnitude_b = math.sqrt(sum(b * b for b in embedding2))
 
-                return dot_product / (magnitude_a * magnitude_b)
+            if magnitude_a == 0 or magnitude_b == 0:
+                return 0.0
+
+            return dot_product / (magnitude_a * magnitude_b)
         except Exception as e:
             logger.error(f"Similarity calculation failed: {e}")
             return 0.0

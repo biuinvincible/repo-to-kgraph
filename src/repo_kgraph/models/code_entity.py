@@ -61,6 +61,18 @@ class CodeEntity(BaseModel):
     docstring: Optional[str] = Field(None, description="Documentation string or comments")
     content: Optional[str] = Field(None, description="Source code content")
 
+    # Semantic analysis fields (for coding agent context)
+    dependencies: List[str] = Field(default_factory=list, description="Function/variable dependencies")
+    side_effects: List[str] = Field(default_factory=list, description="Side effects and external interactions")
+    error_handling: Dict[str, Any] = Field(default_factory=dict, description="Error handling patterns")
+    control_flow_info: Dict[str, Any] = Field(default_factory=dict, description="Control flow analysis")
+    data_flow_info: Dict[str, Any] = Field(default_factory=dict, description="Data flow analysis")
+    usage_patterns: List[str] = Field(default_factory=list, description="Common usage patterns")
+
+    # Enhanced flow analysis (Phase 2)
+    call_patterns: Dict[str, Any] = Field(default_factory=dict, description="Function call patterns and dependencies")
+    complexity_metrics: Dict[str, Any] = Field(default_factory=dict, description="Various complexity measurements")
+
     # Analysis metrics
     complexity_score: Optional[float] = Field(None, ge=0.0, description="Cyclomatic complexity score")
     line_count: int = Field(default=0, ge=0, description="Number of lines in entity")

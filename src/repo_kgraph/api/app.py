@@ -113,11 +113,10 @@ async def initialize_services():
     # Embedding service
     embedding_service = EmbeddingService(
         model_name=config.embedding.model_name,
-        embedding_provider=config.embedding.embedding_provider,
         chroma_db_path=config.database.chroma_db_path,
-        openai_api_key=config.embedding.openai_api_key,
         batch_size=config.embedding.batch_size,
-        max_text_length=config.embedding.max_text_length
+        max_text_length=config.embedding.max_text_length,
+        device=config.embedding.device
     )
     app_state.services["embedding_service"] = embedding_service
 

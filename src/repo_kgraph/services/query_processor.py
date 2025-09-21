@@ -14,7 +14,6 @@ from uuid import uuid4
 
 from repo_kgraph.models.query import Query, QueryStatus
 from repo_kgraph.models.context_result import ContextResult, RetrievalReason
-from repo_kgraph.models.context_result import ContextResult
 from repo_kgraph.models.code_entity import EntityType
 from repo_kgraph.services.retriever import ContextRetriever
 from repo_kgraph.services.embedding import EmbeddingService

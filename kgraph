@@ -59,6 +59,7 @@ print_usage() {
     echo -e "  ${BLUE}list${NC}                      List all indexed repositories"
     echo -e "  ${BLUE}status${NC} [repo-id]          Show repository status"
     echo -e "  ${BLUE}update${NC} <path>             Update existing repository"
+    echo -e "  ${BLUE}clear${NC}                     Clear all parsed repositories"
     echo -e "  ${BLUE}setup${NC}                     Setup databases and dependencies"
     echo -e "  ${BLUE}demo${NC}                      Run demonstration with test data"
     echo -e "  ${BLUE}help${NC}                      Show this help message"
@@ -179,6 +180,11 @@ case "${1:-help}" in
     "list")
         echo -e "${BLUE}📋 Listing repositories...${NC}"
         $PYTHON_CMD -m repo_kgraph.cli list
+        ;;
+
+    "clear")
+        echo -e "${BLUE}🧹 Clearing all repositories...${NC}"
+        $PYTHON_CMD -m repo_kgraph.cli clear
         ;;
 
     "status")

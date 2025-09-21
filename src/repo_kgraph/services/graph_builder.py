@@ -23,6 +23,7 @@ from repo_kgraph.models.repository import Repository
 from repo_kgraph.models.code_entity import CodeEntity, EntityType
 from repo_kgraph.models.relationship import Relationship, RelationshipType
 from repo_kgraph.models.knowledge_graph import KnowledgeGraph, GraphStatus
+from repo_kgraph.services.call_graph_analyzer import CallGraphAnalyzer
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ class GraphBuilder:
         self.username = username
         self.database = database
         self._driver = driver
+        self.call_graph_analyzer = CallGraphAnalyzer()
 
         if not self._driver and GraphDatabase:
             try:
@@ -378,6 +380,29 @@ class GraphBuilder:
             logger.error(f"Failed to get entities: {e}")
             return []
 
+    async def get_entity_by_id(self, entity_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific entity by its ID.
+
+        Args:
+            entity_id: Entity identifier
+
+        Returns:
+            Entity dictionary or None if not found
+        """
+        if not self._driver:
+            return None
+
+        try:
+            with self._driver.session(database=self.database) as session:
+                query = "MATCH (e:Entity {id: $entity_id}) RETURN e"
+                result = session.run(query, {"entity_id": entity_id})
+                record = result.single()
+                return record["e"] if record else None
+        except Exception as e:
+            logger.error(f"Failed to get entity by ID {entity_id}: {e}")
+            return None
+
     async def get_relationships_by_entity(
         self,
         entity_id: str,
@@ -604,11 +629,11 @@ class GraphBuilder:
                            r.name as repository_name,
                            r.path as repository_path,
                            r.created_at as created_at,
-                           r.updated_at as updated_at,
-                           r.status as status,
+                           COALESCE(r.updated_at, r.created_at) as updated_at,
+                           COALESCE(r.status, 'UNKNOWN') as status,
                            count(DISTINCT e) as entity_count,
                            count(DISTINCT rel) as relationship_count
-                    ORDER BY r.updated_at DESC
+                    ORDER BY COALESCE(r.updated_at, r.created_at) DESC
                     """
                 )
 
@@ -630,3 +655,188 @@ class GraphBuilder:
         except Exception as e:
             logger.error(f"Failed to list repositories: {e}")
             return []
+
+    async def get_entity_relationships(
+        self,
+        entity_id: str,
+        direction: str = "both"
+    ) -> List[Relationship]:
+        """
+        Get relationships for an entity.
+
+        Args:
+            entity_id: Entity identifier
+            direction: "incoming", "outgoing", or "both"
+
+        Returns:
+            List of relationships
+        """
+        if not self._driver:
+            return []
+
+        relationships = []
+
+        try:
+            with self._driver.session(database=self.database) as session:
+                if direction in ["outgoing", "both"]:
+                    # Get outgoing relationships
+                    result = session.run(
+                        """
+                        MATCH (source:Entity {id: $entity_id})-[r:RELATES]->(target:Entity)
+                        RETURN r.id as rel_id, r.repository_id as repository_id,
+                               r.source_entity_id as source_id, r.target_entity_id as target_id,
+                               r.relationship_type as rel_type, r.strength as strength,
+                               r.metadata as metadata, r.line_number as line_number
+                        """,
+                        entity_id=entity_id
+                    )
+
+                    for record in result:
+                        from repo_kgraph.models.relationship import Relationship, RelationshipType
+                        relationships.append(Relationship(
+                            id=record["rel_id"],
+                            repository_id=record["repository_id"],
+                            source_entity_id=record["source_id"],
+                            target_entity_id=record["target_id"],
+                            relationship_type=RelationshipType(record["rel_type"]),
+                            strength=record["strength"],
+                            metadata=record["metadata"] or {},
+                            line_number=record["line_number"]
+                        ))
+
+                if direction in ["incoming", "both"]:
+                    # Get incoming relationships
+                    result = session.run(
+                        """
+                        MATCH (source:Entity)-[r:RELATES]->(target:Entity {id: $entity_id})
+                        RETURN r.id as rel_id, r.repository_id as repository_id,
+                               r.source_entity_id as source_id, r.target_entity_id as target_id,
+                               r.relationship_type as rel_type, r.strength as strength,
+                               r.metadata as metadata, r.line_number as line_number
+                        """,
+                        entity_id=entity_id
+                    )
+
+                    for record in result:
+                        from repo_kgraph.models.relationship import Relationship, RelationshipType
+                        relationships.append(Relationship(
+                            id=record["rel_id"],
+                            repository_id=record["repository_id"],
+                            source_entity_id=record["source_id"],
+                            target_entity_id=record["target_id"],
+                            relationship_type=RelationshipType(record["rel_type"]),
+                            strength=record["strength"],
+                            metadata=record["metadata"] or {},
+                            line_number=record["line_number"]
+                        ))
+
+        except Exception as e:
+            logger.error(f"Failed to get relationships for entity {entity_id}: {e}")
+
+        return relationships
+
+    async def analyze_repository_call_graph(self, repository_id: str) -> Dict[str, Any]:
+        """
+        Perform comprehensive call graph analysis for a repository.
+
+        Args:
+            repository_id: Repository identifier
+
+        Returns:
+            Dictionary containing call graph analysis results
+        """
+        try:
+            # Get all entities and relationships for the repository
+            entities = await self.get_entities_by_repository(repository_id)
+
+            # Get all relationships for the repository
+            relationships = []
+            if self._driver:
+                async with self._driver.session(database=self.database) as session:
+                    result = await session.run(
+                        """
+                        MATCH (source:Entity)-[r:RELATES]->(target:Entity)
+                        WHERE source.repository_id = $repository_id
+                        RETURN r.id as rel_id, r.repository_id as repository_id,
+                               r.source_entity_id as source_id, r.target_entity_id as target_id,
+                               r.relationship_type as rel_type, r.strength as strength,
+                               r.metadata as metadata, r.line_number as line_number
+                        """,
+                        repository_id=repository_id
+                    )
+
+                    for record in result:
+                        from repo_kgraph.models.relationship import Relationship, RelationshipType
+                        relationships.append(Relationship(
+                            id=record["rel_id"],
+                            repository_id=record["repository_id"],
+                            source_entity_id=record["source_id"],
+                            target_entity_id=record["target_id"],
+                            relationship_type=RelationshipType(record["rel_type"]),
+                            strength=record["strength"],
+                            metadata=record["metadata"] or {},
+                            line_number=record["line_number"]
+                        ))
+
+            # Perform call graph analysis
+            call_graph_results = self.call_graph_analyzer.build_repository_call_graph(
+                entities, relationships
+            )
+
+            # Store analysis results as metadata
+            if call_graph_results and self._driver:
+                await self._store_call_graph_analysis(repository_id, call_graph_results)
+
+            return call_graph_results
+
+        except Exception as e:
+            logger.error(f"Call graph analysis failed for repository {repository_id}: {e}")
+            return {}
+
+    async def _store_call_graph_analysis(
+        self,
+        repository_id: str,
+        analysis_results: Dict[str, Any]
+    ) -> None:
+        """Store call graph analysis results in the graph database."""
+        try:
+            if not self._driver:
+                return
+
+            async with self._driver.session(database=self.database) as session:
+                # Create or update repository analysis node
+                await session.run(
+                    """
+                    MERGE (repo:Repository {id: $repository_id})
+                    SET repo.call_graph_analysis = $analysis_data,
+                        repo.call_graph_analyzed_at = $timestamp
+                    """,
+                    repository_id=repository_id,
+                    analysis_data=analysis_results.get("analysis_summary", {}),
+                    timestamp=datetime.utcnow().isoformat()
+                )
+
+                # Store critical paths as separate nodes if they exist
+                critical_paths = analysis_results.get("critical_paths", [])
+                for i, path in enumerate(critical_paths[:10]):  # Limit to top 10 paths
+                    await session.run(
+                        """
+                        CREATE (path:CriticalPath {
+                            id: $path_id,
+                            repository_id: $repository_id,
+                            path_index: $index,
+                            entity_path: $entity_path,
+                            complexity_score: $complexity,
+                            has_cycles: $has_cycles
+                        })
+                        """,
+                        path_id=f"{repository_id}_path_{i}",
+                        repository_id=repository_id,
+                        index=i,
+                        entity_path=path.get("path", []),
+                        complexity=path.get("path_complexity", 0.0),
+                        has_cycles=path.get("has_cycles", False)
+                    )
+
+        except Exception as e:
+            logger.warning(f"Failed to store call graph analysis: {e}")

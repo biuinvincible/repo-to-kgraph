@@ -353,6 +353,67 @@ async def list_repos(
         await context.cleanup()
 
 
+@cli.command("clear")
+@click.option("--confirm", is_flag=True, help="Skip confirmation prompt")
+@add_common_options
+@handle_cli_errors
+@async_command
+async def clear_all(
+    confirm: bool,
+    config: Optional[str],
+    env_file: Optional[str],
+    verbose: bool
+):
+    """Clear all parsed repositories and their data."""
+    # Setup CLI context
+    context = setup_cli_context(config, env_file, verbose)
+    set_cli_context(context)
+
+    try:
+        await context.initialize()
+
+        # Get repository manager
+        repo_manager = context.get_service("repository_manager")
+
+        # Get list of repositories first to show what will be deleted
+        repositories = await repo_manager.list_repositories()
+
+        if not repositories:
+            print_info("No repositories found to clear")
+            return
+
+        # Show what will be deleted
+        print_info(f"Found {len(repositories)} repositories to clear:")
+        for repo in repositories:
+            print_info(f"  - {repo.get('repository_name', 'Unknown')} ({repo.get('repository_id', 'Unknown ID')})")
+
+        # Confirmation prompt unless --confirm flag is used
+        if not confirm:
+            console.print("\n[yellow]WARNING: This will permanently delete all repository data![/yellow]")
+            console.print("[yellow]This includes all entities, relationships, and embeddings.[/yellow]")
+
+            response = console.input("\n[bold]Are you sure you want to continue? (yes/no): [/bold]")
+            if response.lower() not in ['yes', 'y']:
+                print_info("Operation cancelled")
+                return
+
+        print_info("Clearing all repository data...")
+
+        # Clear all repositories
+        success = await repo_manager.clear_all_repositories()
+
+        if success:
+            print_success("All repository data cleared successfully")
+        else:
+            print_error("Some repositories could not be cleared (check logs for details)")
+
+    except Exception as e:
+        print_error(f"Clear operation failed: {e}")
+        raise
+    finally:
+        await context.cleanup()
+
+
 def _display_table_results(result: dict):
     """Display query results in table format."""
     from repo_kgraph.cli.base import print_table

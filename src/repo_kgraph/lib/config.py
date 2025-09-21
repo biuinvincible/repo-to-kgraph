@@ -37,26 +37,35 @@ class DatabaseConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     """Configuration for embedding generation."""
 
-    embedding_provider: str = Field(default="ollama", description="Embedding provider")
-    model_name: str = Field(default="embeddinggemma", description="Embedding model name")
+    embedding_provider: str = Field(default="huggingface", description="Embedding provider")
+    model_name: str = Field(default="microsoft/codebert-base", description="Embedding model name")
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
-    batch_size: int = Field(default=32, ge=1, le=1000, description="Batch size for embedding generation")
+    batch_size: int = Field(default=128, ge=1, le=1000, description="Batch size for embedding generation")
     max_text_length: int = Field(default=8192, ge=100, description="Maximum text length for embeddings")
+    device: str = Field(default="cpu", description="Device for model inference (cpu, cuda)")
 
     @field_validator("embedding_provider")
     @classmethod
     def validate_provider(cls, v: str) -> str:
-        valid_providers = ["ollama", "sentence_transformers", "openai"]
+        valid_providers = ["huggingface", "ollama", "sentence_transformers", "openai"]
         if v not in valid_providers:
             raise ValueError(f"Embedding provider must be one of {valid_providers}")
+        return v
+
+    @field_validator("device")
+    @classmethod
+    def validate_device(cls, v: str) -> str:
+        valid_devices = ["cpu", "cuda", "mps"]
+        if v not in valid_devices:
+            raise ValueError(f"Device must be one of {valid_devices}")
         return v
 
 
 class ParsingConfig(BaseModel):
     """Configuration for code parsing."""
 
-    max_file_size_mb: float = Field(default=10.0, ge=0.1, description="Maximum file size to parse in MB")
-    max_concurrent_files: int = Field(default=10, ge=1, le=100, description="Maximum concurrent files to parse")
+    max_file_size_mb: float = Field(default=25.0, ge=0.1, description="Maximum file size to parse in MB")
+    max_concurrent_files: int = Field(default=32, ge=1, le=100, description="Maximum concurrent files to parse")
     default_exclude_patterns: List[str] = Field(
         default_factory=lambda: [
             "*.pyc", "__pycache__/*", "node_modules/*", ".git/*",

@@ -103,11 +103,10 @@ class CLIContext:
             # Embedding service
             embedding_service = EmbeddingService(
                 model_name=self._config.embedding.model_name,
-                embedding_provider=self._config.embedding.embedding_provider,
                 chroma_db_path=self._config.database.chroma_db_path,
-                openai_api_key=self._config.embedding.openai_api_key,
                 batch_size=self._config.embedding.batch_size,
-                max_text_length=self._config.embedding.max_text_length
+                max_text_length=self._config.embedding.max_text_length,
+                device=self._config.embedding.device
             )
             self._services["embedding_service"] = embedding_service
 

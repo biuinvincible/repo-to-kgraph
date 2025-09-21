@@ -17,6 +17,8 @@ from repo_kgraph.models.query import Query
 from repo_kgraph.models.context_result import ContextResult, RetrievalReason
 from repo_kgraph.services.embedding import EmbeddingService
 from repo_kgraph.services.graph_builder import GraphBuilder
+from repo_kgraph.services.multi_hop_retriever import MultiHopRetriever
+from repo_kgraph.services.task_context_adapter import TaskContextAdapter
 
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,16 @@ class ContextRetriever:
         self.similarity_weight = similarity_weight
         self.graph_weight = graph_weight
 
+        # Initialize multi-hop retriever
+        self.multi_hop_retriever = MultiHopRetriever(
+            embedding_service=embedding_service,
+            graph_builder=graph_builder,
+            max_hops=graph_traversal_depth
+        )
+
+        # Initialize task context adapter
+        self.task_context_adapter = TaskContextAdapter()
+
     async def retrieve_context(
         self,
         query: Query,
@@ -108,29 +120,59 @@ class ContextRetriever:
                 similarity_results, query, confidence_threshold
             )
 
-            # Step 4: Graph-based expansion if enabled
+            # Step 4: Multi-hop graph expansion if enabled
             if include_related and context_candidates:
-                expanded_candidates = await self._expand_with_graph_traversal(
-                    context_candidates, query, max_results
+                # Convert context candidates back to entities for multi-hop
+                initial_entities = []
+                for candidate in context_candidates:
+                    entity = await self.graph_builder.get_entity_by_id(candidate.entity_id)
+                    if entity:
+                        initial_entities.append(entity)
+
+                # Perform multi-hop expansion
+                context_graph = await self.multi_hop_retriever.retrieve_with_multi_hop_context(
+                    query.query_text,
+                    query.repository_id,
+                    initial_entities,
+                    max_results * 2  # Get more candidates for better filtering
                 )
-                context_candidates.extend(expanded_candidates)
+
+                # Convert context graph back to context results
+                multi_hop_results = self.multi_hop_retriever.convert_to_context_results(
+                    context_graph, max_results
+                )
+
+                # Replace candidates with multi-hop enhanced results
+                context_candidates = multi_hop_results
 
             # Step 5: Re-rank and filter results
             final_results = await self._rerank_and_filter_results(
                 context_candidates, query, max_results, confidence_threshold
             )
 
-            # Step 6: Add metadata and return
-            for result in final_results:
+            # Step 6: Apply task-specific context adaptation
+            adapted_context = self.task_context_adapter.adapt_context_for_task(
+                task_description=query.query_text,
+                context_results=final_results
+            )
+
+            # Combine primary and supporting context
+            adapted_results = adapted_context.primary_context + adapted_context.supporting_context
+
+            # Step 7: Add metadata and return
+            for result in adapted_results:
                 result.metadata.update({
-                    "retrieval_method": "hybrid_search",
+                    "retrieval_method": "hybrid_search_with_task_adaptation",
                     "similarity_weight": self.similarity_weight,
                     "graph_weight": self.graph_weight,
                     "graph_traversal_depth": self.graph_traversal_depth,
-                    "total_candidates": len(context_candidates)
+                    "total_candidates": len(context_candidates),
+                    "task_type": adapted_context.task_specific_metadata.get("task_type"),
+                    "context_summary": adapted_context.context_summary,
+                    "recommended_actions": adapted_context.recommended_actions
                 })
 
-            return final_results
+            return adapted_results
 
         except Exception as e:
             logger.error(f"Context retrieval failed: {e}")
@@ -266,13 +308,7 @@ class ContextRetriever:
     ) -> Optional[Dict[str, Any]]:
         """Get entity data from the graph database."""
         try:
-            entities = await self.graph_builder.get_entities_by_repository(
-                repository_id=repository_id,
-                limit=1
-            )
-            # This is simplified - in practice would need a more specific query
-            # to get entity by ID
-            return entities[0] if entities else None
+            return await self.graph_builder.get_entity_by_id(entity_id)
         except Exception as e:
             logger.warning(f"Failed to get entity data for {entity_id}: {e}")
             return None
