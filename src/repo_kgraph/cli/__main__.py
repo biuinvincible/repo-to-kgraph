@@ -550,6 +550,24 @@ Configuration:
     print_panel(content, title="System Status", style=style)
 
 
+@cli.command("interactive")
+@click.option("--config", type=click.Path(exists=True), help="Path to configuration file")
+@click.option("--env-file", type=click.Path(exists=True), help="Path to environment file")
+@handle_cli_errors
+def interactive_shell(config: Optional[str], env_file: Optional[str]):
+    """
+    Start interactive CLI shell (Claude Code-like interface).
+
+    Provides a faster, more user-friendly way to interact with the system
+    without repeatedly typing './kgraph' commands.
+    """
+    from repo_kgraph.cli.interactive import interactive
+
+    # Create a new click context and invoke the interactive command
+    ctx = click.Context(interactive)
+    ctx.invoke(interactive, config=config, env_file=env_file)
+
+
 def main():
     """Main entry point."""
     try:

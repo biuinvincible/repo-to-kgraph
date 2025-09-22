@@ -27,12 +27,8 @@ except ImportError:
     AutoModel = None
     AutoTokenizer = None
 
-try:
-    import chromadb
-    from chromadb.config import Settings
-    from chromadb.utils import embedding_functions
-except ImportError:
-    chromadb = None
+# ChromaDB removed - using unified Neo4j vector storage
+chromadb = None
 
 try:
     from langchain_ollama import OllamaEmbeddings
@@ -43,6 +39,11 @@ try:
     from vllm import LLM
 except ImportError:
     LLM = None
+
+try:
+    from langchain_neo4j import Neo4jVector
+except ImportError:
+    Neo4jVector = None
 
 from repo_kgraph.models.code_entity import CodeEntity
 from repo_kgraph.models.query import Query
@@ -72,19 +73,28 @@ class EmbeddingService:
         max_text_length: int = 8192,
         device: str = "cpu",  # Use "cuda" for GPU acceleration if available
         embedding_provider: str = "sentence_transformers",
-        ollama_concurrent_requests: int = 10
+        ollama_concurrent_requests: int = 10,
+        # Neo4j connection parameters
+        neo4j_url: str = "neo4j://localhost:7687",
+        neo4j_username: str = "neo4j",
+        neo4j_password: str = "testpassword",
+        use_neo4j_vector: bool = True
     ):
         """
         Initialize the embedding service.
 
         Args:
             model_name: Model name
-            chroma_db_path: Path to Chroma database storage
+            chroma_db_path: Path to Chroma database storage (deprecated when using Neo4j vector)
             batch_size: Batch size for processing
             max_text_length: Maximum text length for embeddings
             device: Device to run the model on ("cpu" or "cuda")
-            embedding_provider: Provider to use ("sentence_transformers", "ollama", "openai")
+            embedding_provider: Provider to use ("sentence_transformers", "ollama", "vllm")
             ollama_concurrent_requests: Maximum concurrent requests to Ollama API
+            neo4j_url: Neo4j connection URL
+            neo4j_username: Neo4j username
+            neo4j_password: Neo4j password
+            use_neo4j_vector: Whether to use unified Neo4j vector storage (default: True)
         """
         self.model_name = model_name
         self.chroma_db_path = chroma_db_path
@@ -94,9 +104,16 @@ class EmbeddingService:
         self.embedding_provider = embedding_provider
         self.ollama_concurrent_requests = ollama_concurrent_requests
 
+        # Neo4j connection parameters
+        self.neo4j_url = neo4j_url
+        self.neo4j_username = neo4j_username
+        self.neo4j_password = neo4j_password
+        self.use_neo4j_vector = use_neo4j_vector
+
         self._model = None
         self._tokenizer = None
         self._chroma_client = None
+        self._neo4j_vector = None
         self._embedding_dim = None
 
         # Initialize embedding model based on provider
@@ -109,8 +126,13 @@ class EmbeddingService:
         else:
             raise EmbeddingError(f"Unsupported embedding provider: {self.embedding_provider}")
 
-        # Initialize Chroma client
-        self._initialize_chroma()
+        # Initialize unified Neo4j vector storage
+        if self.use_neo4j_vector:
+            self._initialize_neo4j_vector()
+        else:
+            # Legacy ChromaDB mode disabled
+            logger.warning("ChromaDB mode is deprecated - enable use_neo4j_vector=True")
+            raise EmbeddingError("ChromaDB mode disabled - use unified Neo4j vector storage")
 
     def _load_swerank_model(self) -> None:
         """Load SweRankEmbed model using proper transformers approach."""
@@ -255,6 +277,35 @@ class EmbeddingService:
             logger.info(f"Initialized ChromaDB client at {self.chroma_db_path}")
         except Exception as e:
             logger.error(f"Failed to initialize ChromaDB: {e}")
+
+    def _initialize_neo4j_vector(self) -> None:
+        """Initialize Neo4j vector store with unified embedding storage."""
+        if not Neo4jVector:
+            raise EmbeddingError("langchain-neo4j not available. Install with: pip install langchain-neo4j")
+
+        try:
+            logger.info(f"Initializing Neo4j vector store at {self.neo4j_url}...")
+
+            # Create the embedding model instance for Neo4j vector
+            if self.embedding_provider == "ollama":
+                if not OllamaEmbeddings:
+                    raise EmbeddingError("langchain-ollama not available for Neo4j vector mode")
+                embedding_model = OllamaEmbeddings(model=self.model_name)
+            elif self.embedding_provider == "sentence_transformers":
+                if not HuggingFaceEmbeddings:
+                    raise EmbeddingError("langchain-huggingface not available for Neo4j vector mode")
+                embedding_model = HuggingFaceEmbeddings(model_name=self.model_name)
+            else:
+                raise EmbeddingError(f"Neo4j vector mode not supported for provider: {self.embedding_provider}")
+
+            # Initialize Neo4j vector store (this will be used for adding documents later)
+            # We don't create it here because we need documents
+            self._embedding_model = embedding_model
+            logger.info(f"Neo4j vector store configuration ready for {self.embedding_provider}")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize Neo4j vector store: {e}")
+            raise EmbeddingError(f"Cannot initialize Neo4j vector store: {e}")
 
     async def generate_embedding(self, text: str) -> Optional[List[float]]:
         """
@@ -683,6 +734,75 @@ class EmbeddingService:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
+    async def store_embeddings_in_neo4j(
+        self,
+        entities: List[CodeEntity],
+        collection_name: str
+    ) -> bool:
+        """
+        Store entity embeddings in Neo4j vector store.
+
+        Args:
+            entities: Code entities with embeddings
+            collection_name: Collection identifier (used as index name)
+
+        Returns:
+            True if storage successful, False otherwise
+        """
+        if not self._embedding_model or not entities:
+            logger.warning(f"Neo4j vector store not available or no entities to store. Model: {bool(self._embedding_model)}, Entities: {len(entities) if entities else 0}")
+            return False
+
+        try:
+            from langchain_core.documents import Document
+
+            # Prepare documents for Neo4j vector store
+            documents = []
+            for entity in entities:
+                # Create document content from entity
+                content = f"{entity.name}\n{entity.content if entity.content else ''}"
+
+                # Create metadata for the document
+                metadata = {
+                    "entity_id": entity.id,
+                    "entity_type": entity.entity_type.value if hasattr(entity.entity_type, 'value') else str(entity.entity_type),
+                    "name": entity.name,
+                    "qualified_name": entity.qualified_name,
+                    "file_path": entity.file_path,
+                    "language": entity.language,
+                    "repository_id": entity.repository_id,
+                    "start_line": entity.start_line,
+                    "end_line": entity.end_line,
+                }
+
+                doc = Document(page_content=content, metadata=metadata)
+                documents.append(doc)
+
+            # Create Neo4j vector store from documents
+            logger.info(f"Creating Neo4j vector store with {len(documents)} documents...")
+
+            vector_store = Neo4jVector.from_documents(
+                documents=documents,
+                embedding=self._embedding_model,
+                url=self.neo4j_url,
+                username=self.neo4j_username,
+                password=self.neo4j_password,
+                index_name=f"vector_{collection_name}",
+                node_label=f"CodeEntity_{collection_name.replace('-', '_')}"
+            )
+
+            # Store the vector store for later similarity search
+            self._neo4j_vector = vector_store
+
+            logger.info(f"Successfully stored {len(documents)} entities in Neo4j vector store")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to store embeddings in Neo4j: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+
     async def similarity_search(
         self,
         query_text: str,
@@ -695,13 +815,72 @@ class EmbeddingService:
 
         Args:
             query_text: Text to search for
-            collection_name: Chroma collection name
+            collection_name: Collection name
             top_k: Number of results to return
             filters: Optional metadata filters
 
         Returns:
             List of similar entities with scores
         """
+        if self.use_neo4j_vector:
+            return await self._similarity_search_neo4j(query_text, collection_name, top_k, filters)
+        else:
+            return await self._similarity_search_chroma(query_text, collection_name, top_k, filters)
+
+    async def _similarity_search_neo4j(
+        self,
+        query_text: str,
+        collection_name: str,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Search using Neo4j vector store."""
+        if not self._neo4j_vector:
+            logger.warning("Neo4j vector store not initialized")
+            return []
+
+        try:
+            # Use Neo4j vector store for similarity search
+            results = self._neo4j_vector.similarity_search_with_score(
+                query=query_text,
+                k=top_k
+            )
+
+            # Convert results to our expected format
+            formatted_results = []
+            for doc, score in results:
+                result = {
+                    'id': doc.metadata.get('entity_id'),
+                    'entity_type': doc.metadata.get('entity_type'),
+                    'name': doc.metadata.get('name'),
+                    'qualified_name': doc.metadata.get('qualified_name'),
+                    'file_path': doc.metadata.get('file_path'),
+                    'language': doc.metadata.get('language'),
+                    'repository_id': doc.metadata.get('repository_id'),
+                    'start_line': doc.metadata.get('start_line'),
+                    'end_line': doc.metadata.get('end_line'),
+                    'score': float(score),
+                    'content': doc.page_content
+                }
+                formatted_results.append(result)
+
+            logger.info(f"Found {len(formatted_results)} results for query '{query_text}' in Neo4j")
+            return formatted_results
+
+        except Exception as e:
+            logger.error(f"Neo4j similarity search failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return []
+
+    async def _similarity_search_chroma(
+        self,
+        query_text: str,
+        collection_name: str,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Search using ChromaDB (legacy mode)."""
         if not self._chroma_client:
             return []
 

@@ -474,13 +474,8 @@ class DatabaseManager:
             # Don't fail completely if Neo4j is unavailable
             pass
 
-        # Initialize ChromaDB
-        try:
-            await self.chroma.initialize()
-        except Exception as e:
-            logger.error(f"ChromaDB initialization failed: {e}")
-            # Don't fail completely if ChromaDB is unavailable
-            pass
+        # ChromaDB disabled - using unified Neo4j vector storage
+        logger.info("ChromaDB initialization skipped - using unified Neo4j vector storage")
 
         self._initialized = True
         logger.info("Database initialization completed")

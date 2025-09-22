@@ -53,6 +53,7 @@ print_usage() {
     echo "  ./kgraph <command> [options]"
     echo ""
     echo -e "${GREEN}COMMANDS:${NC}"
+    echo -e "  ${BLUE}interactive${NC} (i,shell)      Start interactive shell (Claude Code-like UI)"
     echo -e "  ${BLUE}parse${NC} <path>              Parse repository and build knowledge graph"
     echo -e "  ${BLUE}query${NC} <description>       Query for relevant code context"
     echo -e "  ${BLUE}serve${NC}                     Start API server"
@@ -65,6 +66,7 @@ print_usage() {
     echo -e "  ${BLUE}help${NC}                      Show this help message"
     echo ""
     echo -e "${GREEN}EXAMPLES:${NC}"
+    echo "  ./kgraph interactive           # Start interactive shell (recommended)"
     echo "  ./kgraph parse /path/to/my-project"
     echo "  ./kgraph query \"implement user authentication\""
     echo "  ./kgraph serve --port 8080"
@@ -203,6 +205,12 @@ case "${1:-help}" in
         echo -e "${BLUE}🔄 Updating repository: $2${NC}"
         shift 1
         $PYTHON_CMD -m repo_kgraph.cli parse-repo "$@" --incremental
+        ;;
+
+    "interactive"|"shell"|"i")
+        echo -e "${BLUE}🚀 Starting interactive shell...${NC}"
+        shift 1
+        $PYTHON_CMD -m repo_kgraph.cli interactive "$@"
         ;;
 
     "setup")

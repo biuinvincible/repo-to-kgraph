@@ -108,7 +108,12 @@ class CLIContext:
                 max_text_length=self._config.embedding.max_text_length,
                 device=self._config.embedding.device,
                 embedding_provider=self._config.embedding.embedding_provider,
-                ollama_concurrent_requests=self._config.embedding.ollama_concurrent_requests
+                ollama_concurrent_requests=self._config.embedding.ollama_concurrent_requests,
+                # Neo4j vector parameters
+                neo4j_url=self._config.database.neo4j_uri,
+                neo4j_username=self._config.database.neo4j_username,
+                neo4j_password=self._config.database.neo4j_password,
+                use_neo4j_vector=True  # Enable unified Neo4j vector storage
             )
             self._services["embedding_service"] = embedding_service
 

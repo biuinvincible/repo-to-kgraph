@@ -260,12 +260,20 @@ class RepositoryManager:
                 collection_name = f"repo_{repository_id}"
 
                 try:
-                    embeddings_stored = await self.embedding_service.store_embeddings_in_chroma(
-                        all_entities, collection_name
-                    )
-                    
+                    # Use unified Neo4j vector storage or fallback to ChromaDB
+                    if hasattr(self.embedding_service, 'use_neo4j_vector') and self.embedding_service.use_neo4j_vector:
+                        embeddings_stored = await self.embedding_service.store_embeddings_in_neo4j(
+                            all_entities, collection_name
+                        )
+                        storage_type = "Neo4j vector store"
+                    else:
+                        embeddings_stored = await self.embedding_service.store_embeddings_in_chroma(
+                            all_entities, collection_name
+                        )
+                        storage_type = "ChromaDB"
+
                     if not embeddings_stored:
-                        raise Exception("ChromaDB storage failed - no embeddings stored")
+                        raise Exception(f"{storage_type} storage failed - no embeddings stored")
                         
                 except Exception as chroma_error:
                     logger.error(f"ChromaDB storage failed: {chroma_error}")
@@ -545,7 +553,12 @@ class RepositoryManager:
             embeddings_created = await self.embedding_service.embed_code_entities_batch(parsed_entities)
 
             collection_name = f"repo_{repository_id}"
-            await self.embedding_service.store_embeddings_in_chroma(parsed_entities, collection_name)
+
+            # Use unified Neo4j vector storage or fallback to ChromaDB
+            if hasattr(self.embedding_service, 'use_neo4j_vector') and self.embedding_service.use_neo4j_vector:
+                await self.embedding_service.store_embeddings_in_neo4j(parsed_entities, collection_name)
+            else:
+                await self.embedding_service.store_embeddings_in_chroma(parsed_entities, collection_name)
 
             # Phase 4: Update metrics
             await self._update_progress(operation_id, 95.0, "updating_metrics", progress_callback)
@@ -754,7 +767,7 @@ class RepositoryManager:
             logger.error(f"Vector collection cleanup failed: {e}")
 
     async def _validate_database_consistency(self, repository_id: str, expected_entities: int) -> None:
-        """Validate that Neo4j and ChromaDB have consistent data."""
+        """Validate that Neo4j has consistent data."""
         try:
             # Get entity count from Neo4j
             neo4j_entities = await self.graph_builder.get_entities_by_repository(
@@ -763,25 +776,11 @@ class RepositoryManager:
             )
             neo4j_count = len(neo4j_entities)
 
-            # Get entity count from ChromaDB
-            collection_name = f"repo_{repository_id}"
-            try:
-                collection = self.embedding_service._chroma_client.get_collection(collection_name)
-                chroma_count = collection.count()
-            except Exception:
-                chroma_count = 0
-
-            # Consistency checks
+            # Consistency check (Neo4j only - ChromaDB is deprecated)
             if neo4j_count != expected_entities:
                 raise Exception(f"Neo4j consistency error: {neo4j_count} != {expected_entities}")
 
-            if chroma_count != expected_entities:
-                raise Exception(f"ChromaDB consistency error: {chroma_count} != {expected_entities}")
-
-            if neo4j_count != chroma_count:
-                raise Exception(f"Database sync error: Neo4j({neo4j_count}) != ChromaDB({chroma_count})")
-
-            logger.info(f"✓ Database consistency validated: {neo4j_count} entities in both systems")
+            logger.info(f"✓ Database consistency validated: {neo4j_count} entities stored successfully")
 
         except Exception as e:
             logger.error(f"Consistency validation failed: {e}")

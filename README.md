@@ -10,10 +10,36 @@ This system enables AI coding agents to efficiently retrieve relevant context fr
 - **Semantic Code Search**: Natural language queries to find relevant code
 - **Multi-Language Support**: Python, JavaScript, TypeScript, Java, Go, Rust, and more
 - **High Performance**: Optimized for 16+ core systems with concurrent processing
-- **Graph Database**: Neo4j-powered relationship mapping
-- **SweRankEmbed Embeddings**: Salesforce's code-optimized embedding model
+- **Unified Neo4j Storage**: Graph relationships AND vector embeddings in one database
+- **Flexible Embeddings**: Ollama, Sentence Transformers, or custom providers
 - **REST API**: Ready for AI agent integration
 - **CLI Tools**: Complete command-line interface
+
+## 🆕 Latest Updates (v2.0)
+
+### Major Architecture Improvements
+
+**🚀 Unified Neo4j Storage (Breaking Change)**
+- **What Changed**: Eliminated ChromaDB dependency - now uses Neo4j for both graph relationships AND vector embeddings
+- **Why**: Solves dual-database synchronization issues that caused query failures
+- **Impact**: Significantly improved reliability and simplified deployment
+
+**⚡ Enhanced Performance**
+- **Atomic Operations**: Guaranteed data consistency with transaction rollback on failures
+- **Faster Queries**: Direct Neo4j vector search without cross-database coordination
+- **Better Scaling**: Single database connection pool for all operations
+
+**🔧 Simplified Configuration**
+- **Removed**: `CHROMA_DB_PATH` configuration (no longer needed)
+- **Added**: Native Neo4j vector index support with LangChain integration
+- **Default**: Ollama embeddings (`embeddinggemma:latest`) for local processing
+
+### Migration Notes
+
+If upgrading from v1.x:
+1. **Remove ChromaDB references** from your `.env` file
+2. **Reindex repositories** to use the new unified storage
+3. **Update scripts** that referenced ChromaDB paths
 
 ## Quick Start
 
@@ -35,31 +61,49 @@ pip install -e .
 ./kgraph setup
 ```
 
-### 2. Parse a Repository
+### 2. Start Interactive Shell (Recommended)
 ```bash
-# Parse your first repository
-./kgraph parse /path/to/your/project
+# Start the interactive shell for a Claude Code-like experience
+./kgraph interactive
+
+# Inside the shell - parse your first repository
+kgraph> p /path/to/your/project
 
 # Expected output:
-# ✓ Repository processed successfully!
+# ✓ Repository parsed successfully!
 # Repository ID: abc123...
 # Entities: 1,247
-# Relationships: 892
+# Switched to repository: abc123
 ```
 
 ### 3. Query for Context
 ```bash
-# First, list your indexed repositories
+# Query for relevant code (in interactive shell)
+kgraph:abc123> q user authentication
+kgraph:abc123> q database connection setup
+kgraph:abc123> q error handling patterns
+
+# List repositories and switch between them
+kgraph:abc123> ls
+kgraph:abc123> use other-repo-id
+
+# Check status and configuration
+kgraph:abc123> status
+kgraph:abc123> config
+
+# Get help anytime
+kgraph:abc123> help
+
+# Exit when done
+kgraph:abc123> exit
+```
+
+**Alternative: Traditional Commands**
+```bash
+# For scripts and automation, use traditional commands:
+./kgraph parse /path/to/your/project
 ./kgraph list
-
-# Query specific repository by ID
-./kgraph query "user authentication implementation" --repository-id your-repo-id
-
-# Natural language queries across all repositories
-./kgraph query "database connection setup"
-./kgraph query "API endpoints for payment processing"
-
-# System status
+./kgraph query "user authentication" --repository-id abc123
 ./kgraph status
 ```
 
@@ -72,11 +116,10 @@ The system uses a `.env` file with optimized defaults for 16-core systems:
 NEO4J_URI=neo4j://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=testpassword
-CHROMA_DB_PATH=./chroma_db
 
-# Embedding Configuration (SweRankEmbed)
-EMBEDDING_PROVIDER=sentence_transformers
-EMBEDDING_MODEL=Salesforce/SweRankEmbed-Small
+# Embedding Configuration
+EMBEDDING_PROVIDER=ollama  # or 'sentence_transformers'
+EMBEDDING_MODEL=embeddinggemma:latest  # or 'Salesforce/SweRankEmbed-Small'
 EMBEDDING_BATCH_SIZE=128
 OLLAMA_CONCURRENT_REQUESTS=10
 EMBEDDING_DEVICE=cpu  # or 'cuda' for GPU
@@ -105,9 +148,108 @@ PARSER_WORKERS=4
 EMBEDDING_DEVICE=cuda
 ```
 
-## CLI Commands
+## 🚀 CLI Guide
 
-### Repository Management
+### Two Ways to Use the CLI
+
+#### 🌟 Interactive Shell (Recommended)
+Start the interactive shell for a Claude Code-like experience:
+
+```bash
+# Start interactive shell
+./kgraph interactive
+# or use shortcuts
+./kgraph i
+./kgraph shell
+```
+
+**Interactive Shell Features:**
+- ⚡ **Fast commands**: No need to type `./kgraph` repeatedly
+- 🎯 **Context-aware**: Remembers current repository
+- 📊 **Rich output**: Beautiful tables and formatted results
+- 🔄 **Command history**: Persistent history with tab completion
+- 💡 **Smart prompts**: Shows current repo in prompt
+
+#### 📝 Traditional Commands
+Use individual commands for scripts and automation:
+
+```bash
+./kgraph parse /path/to/repo
+./kgraph query "search text"
+./kgraph list
+```
+
+---
+
+### 🎯 Interactive Shell Commands
+
+Once in the interactive shell (`./kgraph interactive`), use these commands:
+
+#### Repository Management
+```
+parse /path/to/repo    (p)     Parse and index a repository
+list                   (ls)    List all indexed repositories
+use <repo-id>         (switch) Switch to a different repository
+status [repo-id]      (st)     Show repository status
+```
+
+#### Querying
+```
+query <search-text>   (q)      Query for relevant code context
+```
+
+#### Utilities
+```
+config                         Show current configuration
+clear                 (cls)    Clear the screen
+help                  (h, ?)   Show available commands
+exit                  (quit)   Exit the interactive shell
+```
+
+#### Example Interactive Session
+```bash
+$ ./kgraph interactive
+
+🚀 Repository Knowledge Graph - Interactive CLI
+Type 'help' or '?' for available commands
+
+kgraph> p /path/to/my-project
+✓ Repository parsed successfully!
+Repository ID: abc123...
+Entities: 1,247
+Switched to repository: abc123
+
+kgraph:abc123> q user authentication
+🔍 Results for: user authentication
+┏━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Score  ┃ Type     ┃ Name               ┃ File                         ┃
+┡━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 0.94   │ FUNCTION │ authenticate_user  │ auth/middleware.py:45        │
+│ 0.89   │ CLASS    │ UserAuthenticator │ auth/authenticator.py:12     │
+│ 0.84   │ FUNCTION │ verify_token      │ auth/jwt_utils.py:28         │
+└────────┴──────────┴────────────────────┴──────────────────────────────┘
+
+kgraph:abc123> q database connection
+[More results...]
+
+kgraph:abc123> ls
+📚 Indexed Repositories
+[Repository list...]
+
+kgraph:abc123> help
+[Command reference...]
+
+kgraph:abc123> exit
+👋 Thanks for using Repository Knowledge Graph!
+```
+
+---
+
+### 📋 Traditional CLI Commands
+
+For scripts, automation, or one-off commands:
+
+#### Repository Management
 ```bash
 # Parse repository
 ./kgraph parse /path/to/repository
@@ -128,17 +270,197 @@ EMBEDDING_DEVICE=cuda
 ./kgraph clear
 ```
 
-### Querying
+#### Querying
 ```bash
 # Basic queries
 ./kgraph query "user authentication logic"
 ./kgraph query "database connection handling"
 ./kgraph query "error handling patterns"
 
-# Advanced queries
+# Advanced queries with options
 ./kgraph query "payment processing" --repository-id abc123
 ./kgraph query "validation logic" --max-results 20 --confidence 0.8
+./kgraph query "JWT authentication" --repository-id web-app --verbose
 ```
+
+#### System Management
+```bash
+# Setup databases
+./kgraph setup
+
+# Start API server
+./kgraph serve
+./kgraph serve --host 0.0.0.0 --port 8080
+
+# Run demo
+./kgraph demo
+
+# Show help
+./kgraph help
+```
+
+---
+
+### 🔧 Command Options Reference
+
+#### Parse Command Options
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--verbose` | Enable detailed logging | `./kgraph parse /repo --verbose` |
+| `--languages` | Filter by programming languages | `--languages python,javascript` |
+| `--exclude` | Exclude file patterns | `--exclude "*.test.py,node_modules/*"` |
+| `--repository-id` | Custom repository identifier | `--repository-id my-project` |
+| `--reset-repo` | Reset and recreate repository data | `--reset-repo` |
+
+#### Query Command Options
+| Option | Description | Default | Example |
+|--------|-------------|---------|---------|
+| `--repository-id` | Target specific repository | (all repos) | `--repository-id abc123` |
+| `--max-results` | Limit number of results | 20 | `--max-results 10` |
+| `--confidence` | Minimum confidence threshold | 0.3 | `--confidence 0.8` |
+| `--verbose` | Show detailed processing | False | `--verbose` |
+
+#### Server Command Options
+| Option | Description | Default | Example |
+|--------|-------------|---------|---------|
+| `--host` | Server host address | 127.0.0.1 | `--host 0.0.0.0` |
+| `--port` | Server port | 8000 | `--port 8080` |
+| `--reload` | Auto-reload on changes | False | `--reload` |
+
+---
+
+### 🚀 Getting Started Guide
+
+#### Step 1: Setup
+```bash
+# Start Neo4j and setup environment
+./kgraph setup
+```
+
+#### Step 2: Choose Your Interface
+
+**For Interactive Use (Recommended):**
+```bash
+# Start interactive shell
+./kgraph interactive
+
+# Inside the shell:
+kgraph> p /path/to/your/project
+kgraph> q "what you're looking for"
+```
+
+**For Scripts and Automation:**
+```bash
+# Parse repository
+./kgraph parse /path/to/your/project
+
+# Query with repository ID
+./kgraph query "authentication logic" --repository-id your-repo-id
+```
+
+#### Step 3: Basic Workflow
+
+1. **Parse your repository**:
+   ```bash
+   ./kgraph interactive
+   kgraph> p /path/to/my-project
+   ```
+
+2. **Query for relevant code**:
+   ```bash
+   kgraph:my-project> q user authentication
+   kgraph:my-project> q database connection
+   kgraph:my-project> q error handling
+   ```
+
+3. **Explore results**:
+   - Click on file paths to open in your editor
+   - Use results to understand code structure
+   - Query for related concepts
+
+---
+
+### 💡 Best Practices
+
+#### Interactive Shell Tips
+- ✅ **Use shortcuts**: `p` instead of `parse`, `q` instead of `query`, `ls` instead of `list`
+- ✅ **Tab completion**: Press Tab to complete commands and see options
+- ✅ **Command history**: Use ↑/↓ arrows to navigate previous commands
+- ✅ **Keep shell open**: Maintain session for faster repeated queries
+- ✅ **Use `help`**: Type `help` anytime to see available commands
+
+#### Query Best Practices
+- 🎯 **Be specific**: "JWT authentication" vs "auth"
+- 🎯 **Use natural language**: "how to connect to database" works well
+- 🎯 **Adjust confidence**: Lower for more results, higher for precision
+- 🎯 **Try variations**: If no results, try synonyms or broader terms
+
+#### Repository Management
+- 📁 **One-time setup**: Parse repository once, query many times
+- 📁 **Update incrementally**: Use `parse` again after major code changes
+- 📁 **Multiple projects**: Parse multiple repos and switch between them
+- 📁 **Clean exclusions**: Exclude test files, node_modules, build directories
+
+#### Example Workflows
+
+**Finding Authentication Code:**
+```bash
+kgraph:my-app> q authentication
+kgraph:my-app> q login process
+kgraph:my-app> q JWT token validation
+```
+
+**Understanding Database Layer:**
+```bash
+kgraph:backend> q database connection
+kgraph:backend> q SQL queries
+kgraph:backend> q database migrations
+```
+
+**API Development:**
+```bash
+kgraph:api-server> q REST endpoints
+kgraph:api-server> q request validation
+kgraph:api-server> q error handling middleware
+```
+
+---
+
+### 🆘 Troubleshooting
+
+#### Interactive Shell Issues
+```bash
+# If shell won't start
+./kgraph setup  # Ensure databases are running
+
+# If commands don't work
+help  # Check available commands
+config  # Verify configuration
+```
+
+#### No Query Results
+```bash
+# Try lower confidence threshold
+q "your search" --confidence 0.1
+
+# Check if repository was parsed
+ls  # List repositories
+status  # Check current repo status
+
+# Try broader search terms
+q "auth" instead of "authentication middleware"
+```
+
+#### Repository Not Found
+```bash
+# List all available repositories
+ls
+
+# Parse the repository if not found
+p /path/to/your/repository
+```
+
+---
 
 ## Querying Specific Repositories
 
@@ -281,9 +603,10 @@ EMBEDDING_DEVICE=cuda
 # │   TypeScript: 22 files (14.1%)                                               │
 # │                                                                               │
 # │ Embedding Info:                                                               │
-# │   Provider: sentence_transformers                                             │
-# │   Model: Salesforce/SweRankEmbed-Small                                        │
+# │   Provider: ollama                                                            │
+# │   Model: embeddinggemma:latest                                                │
 # │   Dimension: 768                                                              │
+# │   Storage: Neo4j Vector Index                                                 │
 # ╰───────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -533,8 +856,16 @@ curl -X POST http://localhost:8080/query \
 ## Architecture
 
 - **Parser**: Tree-sitter + Python AST for multi-language code analysis
-- **Graph Database**: Neo4j for relationship storage and traversal
-- **Vector Database**: ChromaDB for semantic similarity search
-- **Embeddings**: Salesforce SweRankEmbed-Small for code-optimized vectors
+- **Unified Storage**: Neo4j for both graph relationships and vector embeddings
+- **Vector Search**: Neo4j Vector Index with LangChain integration
+- **Embeddings**: Ollama (default) or Sentence Transformers for code-optimized vectors
 - **API**: FastAPI REST endpoints for agent integration
 - **CLI**: Click-based command-line interface
+
+### Key Improvements in Latest Version
+
+- **🚀 Unified Storage**: Eliminated dual-database complexity by storing both graph data and vector embeddings in Neo4j
+- **⚡ Better Performance**: Reduced synchronization issues and improved query reliability
+- **🔧 Simplified Configuration**: No more ChromaDB setup required - just Neo4j
+- **📈 Enhanced Reliability**: Atomic operations ensure data consistency
+- **🎯 Ollama Integration**: Local embedding generation with `embeddinggemma:latest`
