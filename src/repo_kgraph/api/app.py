@@ -116,7 +116,9 @@ async def initialize_services():
         chroma_db_path=config.database.chroma_db_path,
         batch_size=config.embedding.batch_size,
         max_text_length=config.embedding.max_text_length,
-        device=config.embedding.device
+        device=config.embedding.device,
+        embedding_provider=config.embedding.embedding_provider,
+        ollama_concurrent_requests=config.embedding.ollama_concurrent_requests
     )
     app_state.services["embedding_service"] = embedding_service
 

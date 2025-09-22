@@ -16,6 +16,9 @@ class RetrievalReason(str, Enum):
     DEPENDENCY_ANALYSIS = "dependency_analysis"
     PATTERN_MATCH = "pattern_match"
     CONTEXT_EXPANSION = "context_expansion"
+    DIRECT_DEPENDENCY = "direct_dependency"
+    INDIRECT_DEPENDENCY = "indirect_dependency"
+    STRUCTURAL_RELATIONSHIP = "structural_relationship"
 
 
 class ContextResult(BaseModel):

@@ -43,6 +43,7 @@ class EmbeddingConfig(BaseModel):
     batch_size: int = Field(default=128, ge=1, le=1000, description="Batch size for embedding generation")
     max_text_length: int = Field(default=8192, ge=100, description="Maximum text length for embeddings")
     device: str = Field(default="cpu", description="Device for model inference (cpu, cuda)")
+    ollama_concurrent_requests: int = Field(default=10, ge=1, le=50, description="Maximum concurrent requests to Ollama API")
 
     @field_validator("embedding_provider")
     @classmethod
@@ -223,6 +224,11 @@ class ConfigManager:
                 embedding_config["batch_size"] = int(os.getenv("EMBEDDING_BATCH_SIZE"))
             except ValueError:
                 logger.warning("Invalid EMBEDDING_BATCH_SIZE, using default")
+        if os.getenv("OLLAMA_CONCURRENT_REQUESTS"):
+            try:
+                embedding_config["ollama_concurrent_requests"] = int(os.getenv("OLLAMA_CONCURRENT_REQUESTS"))
+            except ValueError:
+                logger.warning("Invalid OLLAMA_CONCURRENT_REQUESTS, using default")
 
         if embedding_config:
             env_config["embedding"] = embedding_config
@@ -400,6 +406,7 @@ embedding:
   # openai_api_key: "your-openai-key"  # Required if using OpenAI
   batch_size: 32
   max_text_length: 8192
+  ollama_concurrent_requests: 10
 
 parsing:
   max_file_size_mb: 10.0

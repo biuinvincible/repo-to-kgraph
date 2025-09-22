@@ -106,7 +106,9 @@ class CLIContext:
                 chroma_db_path=self._config.database.chroma_db_path,
                 batch_size=self._config.embedding.batch_size,
                 max_text_length=self._config.embedding.max_text_length,
-                device=self._config.embedding.device
+                device=self._config.embedding.device,
+                embedding_provider=self._config.embedding.embedding_provider,
+                ollama_concurrent_requests=self._config.embedding.ollama_concurrent_requests
             )
             self._services["embedding_service"] = embedding_service
 

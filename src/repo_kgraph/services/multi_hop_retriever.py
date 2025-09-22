@@ -192,19 +192,23 @@ class MultiHopRetriever:
 
             # Process outgoing relationships
             for relationship in outgoing_relationships:
-                target_entity = await self.graph_builder.get_entity_by_id(
+                target_entity_node = await self.graph_builder.get_entity_by_id(
                     relationship.target_entity_id
                 )
-                if target_entity:
-                    related_entities[relationship.relationship_type].append(target_entity)
+                if target_entity_node:
+                    target_entity = self._node_to_code_entity(target_entity_node)
+                    if target_entity:
+                        related_entities[relationship.relationship_type].append(target_entity)
 
             # Process incoming relationships
             for relationship in incoming_relationships:
-                source_entity = await self.graph_builder.get_entity_by_id(
+                source_entity_node = await self.graph_builder.get_entity_by_id(
                     relationship.source_entity_id
                 )
-                if source_entity:
-                    related_entities[relationship.relationship_type].append(source_entity)
+                if source_entity_node:
+                    source_entity = self._node_to_code_entity(source_entity_node)
+                    if source_entity:
+                        related_entities[relationship.relationship_type].append(source_entity)
 
         except Exception as e:
             logger.warning(f"Failed to find related entities for {entity_id}: {e}")
@@ -269,6 +273,68 @@ class MultiHopRetriever:
 
                 visited_entities.add(entity.id)
                 expansion_queue.append((entity.id, hop_distance))
+
+    def _node_to_code_entity(self, node) -> Optional[CodeEntity]:
+        """
+        Convert Neo4j Node to CodeEntity object.
+
+        Args:
+            node: Neo4j Node object from database
+
+        Returns:
+            CodeEntity object or None if conversion fails
+        """
+        try:
+            # Extract properties from Neo4j node
+            props = dict(node.items())
+
+            # Required fields
+            entity_id = props.get('id')
+            repository_id = props.get('repository_id')
+            entity_type = props.get('entity_type')
+            name = props.get('name')
+
+            if not all([entity_id, repository_id, entity_type, name]):
+                logger.warning(f"Missing required fields in node: {props}")
+                return None
+
+            # Create CodeEntity with available properties, providing defaults for required fields
+            embedding_vector = props.get('embedding_vector', [])
+            # If embedding_vector is empty, provide a dummy vector to satisfy validation
+            if not embedding_vector:
+                embedding_vector = [0.0] * 768  # SweRankEmbed dimension
+
+            entity = CodeEntity(
+                id=entity_id,
+                repository_id=repository_id,
+                entity_type=EntityType(entity_type),
+                name=name,
+                qualified_name=props.get('qualified_name', name),
+                file_path=props.get('file_path', ''),
+                start_line=props.get('start_line', 0),
+                end_line=props.get('end_line', 0),
+                start_column=props.get('start_column', 0),  # Add missing required field
+                end_column=props.get('end_column', 0),      # Add missing required field
+                language=props.get('language', 'unknown'),
+                content=props.get('content', ''),
+                docstring=props.get('docstring'),
+                signature=props.get('signature'),
+                complexity=props.get('complexity', 1),
+                dependencies=props.get('dependencies', []),
+                side_effects=props.get('side_effects', []),
+                is_public=props.get('is_public', True),
+                is_async=props.get('is_async', False),
+                return_type=props.get('return_type'),
+                parameters=props.get('parameters', []),
+                semantic_info=props.get('semantic_info', {}),
+                embedding_vector=embedding_vector
+            )
+
+            return entity
+
+        except Exception as e:
+            logger.error(f"Failed to convert node to CodeEntity: {e}")
+            return None
 
     async def _calculate_entity_relevance(
         self,
@@ -336,7 +402,8 @@ class MultiHopRetriever:
     def convert_to_context_results(
         self,
         context_graph: ContextGraph,
-        max_results: int = 20
+        max_results: int = 20,
+        query_id: str = ""
     ) -> List[ContextResult]:
         """Convert context graph to standard ContextResult format."""
 
@@ -367,12 +434,14 @@ class MultiHopRetriever:
 
             # Build context result
             context_result = ContextResult(
+                query_id=query_id,
                 entity_id=node.entity.id,
                 entity_type=node.entity.entity_type,
                 entity_name=node.entity.name,
                 file_path=node.entity.file_path,
                 start_line=node.entity.start_line,
                 end_line=node.entity.end_line,
+                rank_position=i + 1,  # i is 0-indexed, position is 1-indexed
                 content=node.entity.content or "",
                 relevance_score=node.relevance_score,
                 retrieval_reason=retrieval_reason,

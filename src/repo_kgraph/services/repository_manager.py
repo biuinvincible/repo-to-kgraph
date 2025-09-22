@@ -105,13 +105,18 @@ class RepositoryManager:
             # Calculate repository statistics
             total_size = 0
             file_count = 0
-            for file_path in repo_path.rglob('*'):
+            all_files = list(repo_path.rglob('*'))
+            logger.info(f"Found {len(all_files)} total files in repository")
+            
+            for file_path in all_files:
                 if file_path.is_file():
                     file_count += 1
                     try:
                         total_size += file_path.stat().st_size
                     except (OSError, IOError):
                         pass  # Skip files we can't read
+
+            logger.info(f"Repository contains {file_count} files with total size {total_size} bytes")
 
             # Create repository object
             repository = Repository(
@@ -254,12 +259,17 @@ class RepositoryManager:
                 await self._update_progress(repository_id, 85.0, "vector_storage", progress_callback)
                 collection_name = f"repo_{repository_id}"
 
-                embeddings_stored = await self.embedding_service.store_embeddings_in_chroma(
-                    all_entities, collection_name
-                )
-
-                if not embeddings_stored:
-                    raise Exception("ChromaDB storage failed - rolling back Neo4j data")
+                try:
+                    embeddings_stored = await self.embedding_service.store_embeddings_in_chroma(
+                        all_entities, collection_name
+                    )
+                    
+                    if not embeddings_stored:
+                        raise Exception("ChromaDB storage failed - no embeddings stored")
+                        
+                except Exception as chroma_error:
+                    logger.error(f"ChromaDB storage failed: {chroma_error}")
+                    raise Exception(f"ChromaDB storage failed: {chroma_error} - rolling back Neo4j data")
 
                 # Consistency check
                 if embeddings_created != len(all_entities):

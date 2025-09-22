@@ -279,6 +279,7 @@ class SourceCodeFilter:
             Tuple of (included_files, stats)
         """
         repo_path = Path(repo_path).resolve()
+        print(f"DEBUG: Filtering files in repository: {repo_path}")
 
         # Load gitignore files if enabled
         if self.use_gitignore:
@@ -328,6 +329,10 @@ class SourceCodeFilter:
                             stats['languages_found'].add(lang)
                             break
 
+        print(f"DEBUG: Filter results - Total files: {stats['total_files']}, Included: {stats['included_files']}")
+        print(f"DEBUG: Excluded by gitignore: {stats['excluded_by_gitignore']}, patterns: {stats['excluded_by_pattern']}")
+        if stats['exclude_reasons']:
+            print(f"DEBUG: Exclude reasons: {dict(stats['exclude_reasons'])}")
         return included_files, stats
 
     def _should_exclude_dir(self, dir_path: str, repo_root: str) -> bool:
@@ -349,7 +354,9 @@ class SourceCodeFilter:
 
     def _load_gitignore_files(self, repo_root: str):
         """Load and parse .gitignore files from repository."""
+        print(f"DEBUG: GITIGNORE_AVAILABLE = {GITIGNORE_AVAILABLE}")
         if not GITIGNORE_AVAILABLE:
+            print("DEBUG: gitignore_parser not available")
             return
 
         self.gitignore_matchers = []
@@ -357,13 +364,20 @@ class SourceCodeFilter:
 
         # Only load the main .gitignore from repo root to avoid path conflicts
         main_gitignore = os.path.join(repo_root, '.gitignore')
+        print(f"DEBUG: Checking for .gitignore at {main_gitignore}")
+        print(f"DEBUG: File exists: {os.path.exists(main_gitignore)}")
+        
         if os.path.exists(main_gitignore):
             try:
+                print(f"DEBUG: Attempting to parse {main_gitignore}")
                 matcher = parse_gitignore(main_gitignore, base_dir=repo_root)
                 self.gitignore_matchers.append(matcher)
                 gitignore_files_found.append('.gitignore')
+                print(f"DEBUG: Successfully parsed .gitignore")
             except Exception as e:
                 print(f"Warning: Failed to parse {main_gitignore}: {e}")
+                import traceback
+                traceback.print_exc()
 
         if gitignore_files_found:
             print(f"📋 Found .gitignore files: {', '.join(gitignore_files_found)}")

@@ -314,8 +314,8 @@ class TaskContextAdapter:
             if result.entity_type in task_config.priority_entity_types:
                 priority_boost += 0.2
 
-            # Adjust relevance score
-            adjusted_score = result.relevance_score + priority_boost
+            # Adjust relevance score (clamp to max 1.0)
+            adjusted_score = min(1.0, result.relevance_score + priority_boost)
 
             # Create new result with adjusted score
             adjusted_result = ContextResult(

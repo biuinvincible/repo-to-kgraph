@@ -41,8 +41,8 @@ class Relationship(BaseModel):
 
     # Core identification
     id: str = Field(default_factory=lambda: str(uuid4()), description="Unique relationship identifier")
-    source_entity_id: str = Field(..., description="Source entity identifier")
-    target_entity_id: str = Field(..., description="Target entity identifier")
+    source_entity_id: Optional[str] = Field(None, description="Source entity identifier")
+    target_entity_id: Optional[str] = Field(None, description="Target entity identifier")
 
     # Relationship classification
     relationship_type: RelationshipType = Field(..., description="Type of relationship")
@@ -100,17 +100,17 @@ class Relationship(BaseModel):
 
     @field_validator("source_entity_id", "target_entity_id")
     @classmethod
-    def validate_entity_ids(cls, v: str) -> str:
+    def validate_entity_ids(cls, v: Optional[str]) -> Optional[str]:
         """Validate entity ID format."""
-        if not v or not isinstance(v, str):
-            raise ValueError("Entity ID must be non-empty string")
-        # Could add UUID format validation here if needed
+        if v is not None and (not isinstance(v, str) or not v):
+            raise ValueError("Entity ID must be non-empty string or None")
         return v
 
     @model_validator(mode='after')
     def validate_no_self_relationship(self) -> 'Relationship':
         """Validate that source and target entities are different."""
-        if self.source_entity_id and self.target_entity_id and self.source_entity_id == self.target_entity_id:
+        if (self.source_entity_id and self.target_entity_id and 
+            self.source_entity_id == self.target_entity_id):
             raise ValueError("Relationship cannot have the same source and target entity")
         return self
 

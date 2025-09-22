@@ -153,6 +153,8 @@ class CodeParser:
             except Exception as e:
                 logger.debug(f"Could not initialize parser for {lang_name}: {e}")
 
+        logger.info(f"Available parsers: {list(self._parsers.keys())}")
+
     def get_supported_languages(self) -> List[str]:
         """Get list of supported programming languages."""
         return list(self._languages.keys())
@@ -170,6 +172,8 @@ class CodeParser:
         path = Path(file_path)
         file_name = path.name.lower()
         extension = path.suffix.lower()
+
+        logger.debug(f"Detecting language for file: {file_path} (name: {file_name}, ext: {extension})")
 
         # Special file name mappings (files without extensions)
         special_files = {
@@ -203,19 +207,23 @@ class CodeParser:
             lang = special_files[file_name]
             # Only return if we have a parser for this language
             if lang in self._parsers:
+                logger.debug(f"Detected language (special file): {lang}")
                 return lang
 
         # Check for Kubernetes files (common patterns)
         if file_name.endswith(('-deployment.yaml', '-service.yaml', '-configmap.yaml', '-secret.yaml', '-ingress.yaml',
                               '-deployment.yml', '-service.yml', '-configmap.yml', '-secret.yml', '-ingress.yml')):
             if 'yaml' in self._parsers:
+                logger.debug("Detected language (kubernetes file): yaml")
                 return 'yaml'
 
         # Then check extensions, only return if we have a parser
         lang = self.language_map.get(extension)
         if lang and lang in self._parsers:
+            logger.debug(f"Detected language (extension): {lang}")
             return lang
 
+        logger.debug(f"No language detected for file: {file_path}")
         return None
 
     async def parse_file(self, file_path: str, repository_id: str, repository_path: Optional[str] = None) -> ParseResult:
@@ -1147,6 +1155,7 @@ class CodeParser:
                 logger.info(f"Excluded {filter_stats['excluded_by_gitignore']} files by .gitignore rules")
 
         logger.debug(f"Source filtering stats: {filter_stats}")
+        logger.info(f"Found {len(filtered_files)} files after filtering")
 
         # Now filter by language support and include patterns
         files_to_parse = []
@@ -1154,7 +1163,9 @@ class CodeParser:
 
         for file_path in filtered_files:
             # Check if file type is supported
-            if not self.detect_language(str(file_path)):
+            language = self.detect_language(str(file_path))
+            if not language:
+                logger.debug(f"Skipping unsupported file type: {file_path}")
                 continue
 
             # Apply include patterns if specified
@@ -1166,10 +1177,12 @@ class CodeParser:
                         included = True
                         break
                 if not included:
+                    logger.debug(f"Skipping file not matching include patterns: {file_path}")
                     continue
 
             files_to_parse.append(str(file_path))
 
+        logger.info(f"Selected {len(files_to_parse)} files for parsing")
         return files_to_parse
 
     def get_file_hash(self, file_path: str) -> str:

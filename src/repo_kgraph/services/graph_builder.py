@@ -424,11 +424,14 @@ class GraphBuilder:
             return []
 
         if direction == "outgoing":
-            pattern = "(e:Entity {id: $entity_id})-[r:RELATES]->()"
+            pattern = "(e:Entity {id: $entity_id})-[r:RELATES]->(target)"
+            return_fields = "r, e.id as source_id, target.id as target_id"
         elif direction == "incoming":
-            pattern = "()-[r:RELATES]->(e:Entity {id: $entity_id})"
+            pattern = "(source)-[r:RELATES]->(e:Entity {id: $entity_id})"
+            return_fields = "r, source.id as source_id, e.id as target_id"
         else:  # both
-            pattern = "(e:Entity {id: $entity_id})-[r:RELATES]-()"
+            pattern = "(source)-[r:RELATES]-(e:Entity {id: $entity_id})"
+            return_fields = "r, source.id as source_id, e.id as target_id"
 
         query = f"MATCH {pattern}"
         params = {"entity_id": entity_id}
@@ -438,12 +441,20 @@ class GraphBuilder:
             query += " WHERE r.relationship_type IN $relationship_types"
             params["relationship_types"] = type_values
 
-        query += " RETURN r"
+        query += f" RETURN {return_fields}"
 
         try:
             with self._driver.session(database=self.database) as session:
                 result = session.run(query, params)
-                return [record["r"] for record in result]
+                relationships = []
+                for record in result:
+                    # Get the relationship properties
+                    rel_props = dict(record["r"].items())
+                    # Add source and target IDs
+                    rel_props["source_entity_id"] = record["source_id"]
+                    rel_props["target_entity_id"] = record["target_id"]
+                    relationships.append(rel_props)
+                return relationships
         except Exception as e:
             logger.error(f"Failed to get relationships: {e}")
             return []
@@ -669,7 +680,7 @@ class GraphBuilder:
             direction: "incoming", "outgoing", or "both"
 
         Returns:
-            List of relationships
+            List of Relationship objects
         """
         if not self._driver:
             return []
@@ -683,52 +694,62 @@ class GraphBuilder:
                     result = session.run(
                         """
                         MATCH (source:Entity {id: $entity_id})-[r:RELATES]->(target:Entity)
-                        RETURN r.id as rel_id, r.repository_id as repository_id,
-                               r.source_entity_id as source_id, r.target_entity_id as target_id,
-                               r.relationship_type as rel_type, r.strength as strength,
-                               r.metadata as metadata, r.line_number as line_number
+                        RETURN r.id as rel_id, r.relationship_type as rel_type,
+                               r.strength as strength, r.context as context,
+                               r.confidence as confidence, r.frequency as frequency,
+                               r.line_number as line_number, r.created_at as created_at,
+                               source.id as source_id, target.id as target_id
                         """,
                         entity_id=entity_id
                     )
 
                     for record in result:
-                        from repo_kgraph.models.relationship import Relationship, RelationshipType
-                        relationships.append(Relationship(
-                            id=record["rel_id"],
-                            repository_id=record["repository_id"],
-                            source_entity_id=record["source_id"],
-                            target_entity_id=record["target_id"],
-                            relationship_type=RelationshipType(record["rel_type"]),
-                            strength=record["strength"],
-                            metadata=record["metadata"] or {},
-                            line_number=record["line_number"]
-                        ))
+                        try:
+                            from repo_kgraph.models.relationship import Relationship, RelationshipType
+                            relationships.append(Relationship(
+                                id=record["rel_id"],
+                                source_entity_id=record["source_id"],
+                                target_entity_id=record["target_id"],
+                                relationship_type=RelationshipType(record["rel_type"]),
+                                strength=record["strength"] or 1.0,
+                                context=record["context"] or None,
+                                confidence=record["confidence"] or 1.0,
+                                frequency=record["frequency"] or 1,
+                                line_number=record["line_number"] or None
+                            ))
+                        except Exception as e:
+                            logger.warning(f"Failed to create relationship from record: {e}")
 
                 if direction in ["incoming", "both"]:
                     # Get incoming relationships
                     result = session.run(
                         """
                         MATCH (source:Entity)-[r:RELATES]->(target:Entity {id: $entity_id})
-                        RETURN r.id as rel_id, r.repository_id as repository_id,
-                               r.source_entity_id as source_id, r.target_entity_id as target_id,
-                               r.relationship_type as rel_type, r.strength as strength,
-                               r.metadata as metadata, r.line_number as line_number
+                        RETURN r.id as rel_id, r.relationship_type as rel_type,
+                               r.strength as strength, r.context as context,
+                               r.confidence as confidence, r.frequency as frequency,
+                               r.line_number as line_number, r.created_at as created_at,
+                               source.id as source_id, target.id as target_id
                         """,
                         entity_id=entity_id
                     )
 
                     for record in result:
-                        from repo_kgraph.models.relationship import Relationship, RelationshipType
-                        relationships.append(Relationship(
-                            id=record["rel_id"],
-                            repository_id=record["repository_id"],
-                            source_entity_id=record["source_id"],
-                            target_entity_id=record["target_id"],
-                            relationship_type=RelationshipType(record["rel_type"]),
-                            strength=record["strength"],
-                            metadata=record["metadata"] or {},
-                            line_number=record["line_number"]
-                        ))
+                        try:
+                            from repo_kgraph.models.relationship import Relationship, RelationshipType
+                            relationships.append(Relationship(
+                                id=record["rel_id"],
+                                source_entity_id=record["source_id"],
+                                target_entity_id=record["target_id"],
+                                relationship_type=RelationshipType(record["rel_type"]),
+                                strength=record["strength"] or 1.0,
+                                context=record["context"] or None,
+                                confidence=record["confidence"] or 1.0,
+                                frequency=record["frequency"] or 1,
+                                line_number=record["line_number"] or None
+                            ))
+                        except Exception as e:
+                            logger.warning(f"Failed to create relationship from record: {e}")
 
         except Exception as e:
             logger.error(f"Failed to get relationships for entity {entity_id}: {e}")
